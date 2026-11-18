@@ -3,11 +3,20 @@
 Windows-11-Tray-App für Beleuchtung (über den OpenRGB-SDK-Server) und Lüftersteuerung (über LibreHardwareMonitorLib/PawnIO) auf diesem PC:
 MSI MAG Z790 TOMAHAWK WIFI (MS-7D91), 2× Corsair Vengeance RGB DDR5, 7× be quiet! Light Wings (Hub an JRAINBOW3), be quiet! Light Loop (Kühlkopf an JRAINBOW2), RTX 5070 Ti.
 
-## Starten
+## Installieren, aktualisieren, starten
 
-- `dist\LichtLuefter\LichtLuefter.exe` (fragt nach Adminrechten). Mit `--tray` startet sie ohne Fenster.
+- **Installieren und aktualisieren:** `powershell -ExecutionPolicy Bypass -File tools\install.ps1` (fragt nach Adminrechten). Baut die App (lädt bei Bedarf das .NET-10-SDK nach `.tools\dotnet`), beendet eine laufende Instanz sauber, installiert nach `C:\Program Files\LichtLuefter`, legt Startmenü-Verknüpfung und Eintrag unter „Apps & Features“ an und startet die App im Tray. Update: `git pull`, dann dasselbe Skript. Einstellungen bleiben erhalten.
+- **Deinstallieren:** über „Apps & Features“ (ruft `LichtLuefter.exe --uninstall` auf; Einstellungen auf Wunsch behalten).
+- **Starten:** Startmenü „Licht & Lüfter“. Mit `--tray` startet sie ohne Fenster.
 - Autostart: in der App unter *Einstellungen → Beim Anmelden im Tray starten* (Aufgabe „LichtLuefter“ in der Aufgabenplanung).
 - Notfall: `LichtLuefter.exe --restore-bios` stellt alle Lüfterkanäle sofort auf die BIOS-Kurven zurück. Läuft die App, wird sie dabei auf das Profil „BIOS-Kurve“ umgeschaltet (sonst würde sie die Kanäle sofort wieder übernehmen). Reagiert sie nicht, wird direkt zurückgestellt und die Zustandsdatei für den Watchdog behalten. `--quiet` unterdrückt die Meldung. `--exit` beendet eine laufende Instanz sauber.
+
+## Komfort
+
+- **Licht automatisch aus**, wenn der PC gesperrt ist, der Bildschirm ausgeht oder im Ruhezustand (einzeln schaltbar, Einstellungen → „Licht automatisch ausschalten“). Vorübergehend, die eigene Einstellung bleibt gespeichert.
+- **Warnungen:** kritische CPU-/GPU-Temperatur, Lüfter-/Pumpenstörung, Laufwerk über seiner Warngrenze → Licht pulsiert rot und Windows-Benachrichtigung. Endet nach 30 s ohne Bedingung.
+- **Im Vollbild nicht stören:** im Spiel oder bei Präsentationen nur Warnungen.
+- **Tray-Symbol** mit CPU- oder GPU-Temperatur.
 
 ## Beleuchtung
 
