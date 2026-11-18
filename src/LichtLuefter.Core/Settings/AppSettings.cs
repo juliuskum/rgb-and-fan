@@ -150,7 +150,13 @@ public sealed class FanSettings
     public List<ChannelConfig> Channels { get; set; } = new();
 }
 
-public enum LightEffect { Static, Breathing, ColorCycle, Rainbow, Temperature, Fire, Off }
+/// <summary>
+/// Board-Modi auf diesem MSI-Board (gemessen): Static, Breathing, Flashing, Double flashing, Blink, Color pulse,
+/// Marquee werden angenommen. Rainbow wave, Fire, Lightning, Meteor, Color wave, Visor, Stack lösen einen
+/// USB-Reset des Mystic-Light-Controllers aus; danach läuft der im Board-Flash gespeicherte Modus (bei dir
+/// „Rainbow wave“). Deshalb gibt es nur Effekte, deren Board-Teil einer der angenommenen Modi ist.
+/// </summary>
+public enum LightEffect { Static, Breathing, ColorCycle, Rainbow, Temperature, Fire, Off, Flash, Heartbeat, Pulse, Marquee, TwoColor }
 public enum TempSource { Cpu, Gpu, Max }
 
 public sealed class LightProfile
@@ -158,6 +164,8 @@ public sealed class LightProfile
     public string Name { get; set; } = "Standard";
     public LightEffect Effect { get; set; } = LightEffect.Static;
     public string Color { get; set; } = "#3FA9F5";
+    /// <summary>Zweite Farbe (Effekt „Zwei Farben“).</summary>
+    public string Color2 { get; set; } = "#8E6CF0";
     /// <summary>0 = langsam, 1 = mittel, 2 = schnell.</summary>
     public int Speed { get; set; } = 1;
     /// <summary>0–100.</summary>
@@ -184,6 +192,23 @@ public sealed class LightSettings
     ];
 }
 
+public enum TrayIconMode { Icon, Cpu, Gpu }
+
+/// <summary>Komfortfunktionen: Licht automatisch aus, Warnungen, Tray-Symbol.</summary>
+public sealed class ComfortSettings
+{
+    public bool LightOffWhenLocked { get; set; } = false;
+    public bool LightOffWhenDisplayOff { get; set; } = true;
+    public bool LightOffInSleep { get; set; } = true;
+    /// <summary>Bei Warnung (Temperatur, Pumpe, SSD) pulsiert die Beleuchtung rot.</summary>
+    public bool AlarmLight { get; set; } = true;
+    /// <summary>Bei Warnung eine Windows-Benachrichtigung (auch im Vollbild).</summary>
+    public bool AlarmNotify { get; set; } = true;
+    /// <summary>Im Vollbild (Spiel, Präsentation) keine Hinweise außer Warnungen.</summary>
+    public bool QuietInFullscreen { get; set; } = true;
+    public TrayIconMode TrayIcon { get; set; } = TrayIconMode.Cpu;
+}
+
 public sealed class GeneralSettings
 {
     public bool StartOpenRgb { get; set; } = true;
@@ -199,6 +224,7 @@ public sealed class AppSettings
     public LightSettings Light { get; set; } = new();
     public FanSettings Fans { get; set; } = new();
     public GeneralSettings General { get; set; } = new();
+    public ComfortSettings Comfort { get; set; } = new();
 
     public static readonly JsonSerializerOptions Json = new()
     {
@@ -282,6 +308,7 @@ public sealed class SettingsStore
         s.Light.Saved ??= new();
         s.Fans ??= new();
         s.General ??= new();
+        s.Comfort ??= new();
         if (s.Fans.Profiles == null || s.Fans.Profiles.Count == 0) s.Fans.Profiles = FanProfile.Defaults();
         foreach (var d in FanProfile.Defaults())
             if (!s.Fans.Profiles.Any(p => p.Id == d.Id)) s.Fans.Profiles.Add(d);

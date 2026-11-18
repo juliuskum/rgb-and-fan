@@ -167,6 +167,9 @@ public sealed class ExtraMonitor : IDisposable
 
     public IReadOnlyList<MonitorGroup> Groups { get; private set; } = [];
 
+    /// <summary>Laufwerke, deren Temperatur gerade die eigene Warngrenze des Laufwerks erreicht (für Warnungen).</summary>
+    public IReadOnlyList<string> DiskAlerts { get; private set; } = [];
+
     public ExtraMonitor(Func<IReadOnlyList<IHardware>> storage)
     {
         _storage = storage;
@@ -193,6 +196,7 @@ public sealed class ExtraMonitor : IDisposable
             try
             {
                 var groups = new List<MonitorGroup>();
+                var alerts = new List<string>();
                 var m = new MEMORYSTATUSEX { dwLength = (uint)Marshal.SizeOf<MEMORYSTATUSEX>() };
                 if (GlobalMemoryStatusEx(ref m))
                 {
@@ -215,6 +219,9 @@ public sealed class ExtraMonitor : IDisposable
                                                                && (s.Name == "Temperature" || s.Name.StartsWith("Temperature #", StringComparison.Ordinal))).OrderBy(s => s.Index))
                             list.Add(_mm.Track($"disk{n}.t{t.Index}", t.Name == "Temperature" ? "Temperatur" : "Temperatursensor " + t.Name["Temperature #".Length..], t.Value, "°C", 0));
                         var warn = hw.Sensors.FirstOrDefault(s => s.SensorType == SensorType.Temperature && s.Name == "Warning Temperature")?.Value;
+                        var hottest = list.Where(x => x.Unit == "°C").Max(x => x.Value);
+                        if (warn is > 0 and < 150 && hottest is float ht && ht >= warn)
+                            alerts.Add($"{hw.Name}: {ht:0} °C (Warngrenze {warn:0} °C)");
                         if (hw.Sensors.FirstOrDefault(s => s.SensorType == SensorType.Load && s.Name == "Used Space") is { } us)
                             list.Add(_mm.Track($"disk{n}.used", "Belegt", us.Value, "%", 0));
                         foreach (var (name, label) in new[] { ("Read Rate", "Lesen"), ("Write Rate", "Schreiben") })
@@ -223,6 +230,7 @@ public sealed class ExtraMonitor : IDisposable
                         if (list.Count > 0) groups.Add(new MonitorGroup($"disk{n}", "Laufwerk", warn is > 0 and < 150 ? $"{hw.Name}, Warngrenze {warn:0} °C" : hw.Name, list));
                     }
                 Groups = groups;
+                DiskAlerts = alerts;
                 if (!_logged && n > 0 && groups.Any(g => g.Id.StartsWith("disk")))
                 {
                     _logged = true;

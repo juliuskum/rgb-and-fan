@@ -10,6 +10,7 @@ try
     switch (mode)
     {
         case "sdk": ProbeSdk(); break;
+        case "modes": Modes.Run(W); break;
         case "fansweep": FanSweep.Run(W, args.Length > 2 ? args[2] : "trace.csv"); break;
         case "latency": Latency.Run(W); break;
         case "switch": Switch.Run(W); break;

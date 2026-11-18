@@ -20,6 +20,8 @@ internal sealed class TrayApp : ApplicationContext
     private readonly FanService _fans;
     private readonly LightingService _light;
     private readonly ExtraMonitor _extra;
+    private DisplayStateWatcher? _display;
+    private readonly TrayTempIcon _tempIcon = new();
     private readonly NotifyIcon _tray;
     private readonly Control _invoker = new();
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 5000 };
@@ -45,8 +47,8 @@ internal sealed class TrayApp : ApplicationContext
         _lastBackup = OpenRgbBackup.Run();
 
         _fans = new FanService(() => _fanCopy);
-        _fans.Updated += snap => Post(() => { _form?.Send("fan", snap); UpdateTray(snap); SendMonitor(); });
-        _fans.Alert += msg => Post(() => _tray?.ShowBalloonTip(8000, "Lüfter", msg, ToolTipIcon.Warning));
+        _fans.Updated += snap => Post(() => { EvaluateAlarm(snap); _form?.Send("fan", snap); UpdateTray(snap); SendMonitor(); });
+        _fans.Alert += msg => Post(() => Notify("Lüfter", msg, ToolTipIcon.Warning, critical: true));
         _fans.Start();
         _extra = new ExtraMonitor(() => _fans.StorageHardware);
         _extra.Start();
@@ -68,11 +70,19 @@ internal sealed class TrayApp : ApplicationContext
         SystemEvents.PowerModeChanged += OnPower;
         SystemEvents.SessionEnding += OnSessionEnding;
         SystemEvents.SessionEnded += OnSessionEnded;
+        SystemEvents.SessionSwitch += OnSessionSwitch;
+        try
+        {
+            _display = new DisplayStateWatcher();
+            _display.DisplayChanged += on => { _displayOff = !on; Log.Write("Bildschirm " + (on ? "an" : "aus")); UpdateLightOverride(); };
+        }
+        catch (Exception ex) { Log.Write("Bildschirmstatus nicht verfügbar: " + ex.Message); }
 
         ThreadPool.RegisterWaitForSingleObject(_showEvent, (_, _) => Post(ShowWindow), null, -1, false);
         ThreadPool.RegisterWaitForSingleObject(_exitEvent, (_, _) => Post(ExitApp), null, -1, true);
         ThreadPool.RegisterWaitForSingleObject(_biosEvent, (_, _) => Post(() => { Log.Write("Signal: BIOS-Kurve"); SetFanProfile("bios"); }), null, -1, false);
 
+        Autostart.EnsureCurrentPath();
         _autostart = Autostart.IsEnabled();
         _saveTimer.Tick += (_, _) => FlushSave();
         new Thread(CommandPipeLoop) { IsBackground = true, Name = "Befehle" }.Start();
@@ -148,8 +158,97 @@ internal sealed class TrayApp : ApplicationContext
             _ => "BIOS-Kurve",
         };
         var text = $"Licht & Lüfter\nCPU {s.CpuTemp:0} °C, GPU {s.GpuTemp:0} °C\nLüfter: {state}";
+        if (_alarm != null) text = "Warnung: " + _alarm;
         _tray.Text = text.Length > 127 ? text[..127] : text;
-        _tray.Icon = s.Mode == FanMode.Fault || s.Emergency ? _iconWarn : _iconOk;
+
+        bool warn = s.Mode == FanMode.Fault || s.Emergency || _alarm != null;
+        var icon = _settings.Comfort.TrayIcon switch
+        {
+            TrayIconMode.Cpu => _tempIcon.For(s.CpuTemp, warn),
+            TrayIconMode.Gpu => _tempIcon.For(s.GpuTemp, warn),
+            _ => warn ? _iconWarn : _iconOk,
+        } ?? _iconOk;
+        if (!ReferenceEquals(_tray.Icon, icon)) _tray.Icon = icon;
+    }
+
+    // ------------------------------------------------------------------ Komfort: Licht automatisch aus, Warnungen, Hinweise
+
+    private bool _locked, _displayOff, _sleeping;
+    private string? _alarm;
+    private DateTime _alarmClearSince = DateTime.MinValue;
+
+    /// <summary>
+    /// Was das Licht gerade zeigen soll. Priorität: Ruhezustand > Warnung > Bildschirm aus > gesperrt > eigene Einstellung.
+    /// Eine Warnung ist auch bei ausgeschaltetem Bildschirm sichtbar – nur im Ruhezustand nicht.
+    /// </summary>
+    private void UpdateLightOverride()
+    {
+        var c = _settings.Comfort;
+        if (_sleeping && c.LightOffInSleep) _light.SetOverride(LightOverride.Off, "Licht aus, weil der PC im Ruhezustand ist.");
+        else if (_alarm != null && c.AlarmLight) _light.SetOverride(LightOverride.Alarm, "Warnung: " + _alarm);
+        else if (_displayOff && c.LightOffWhenDisplayOff) _light.SetOverride(LightOverride.Off, "Licht aus, weil der Bildschirm aus ist.");
+        else if (_locked && c.LightOffWhenLocked) _light.SetOverride(LightOverride.Off, "Licht aus, weil der PC gesperrt ist.");
+        else _light.SetOverride(LightOverride.None, "");
+    }
+
+    /// <summary>
+    /// Warnungen: kritische Temperatur (Notfall der Lüfterregelung), Lüfter-Störung (z. B. Pumpe), SSD über ihrer Warngrenze.
+    /// Eine Warnung endet erst, wenn 30 s lang keine Bedingung mehr zutrifft (keine Dauerwechsel bei Spitzen).
+    /// </summary>
+    private void EvaluateAlarm(FanSnapshot s)
+    {
+        string? reason = null;
+        bool fromFanFault = false;
+        if (s.Mode == FanMode.Fault) { reason = s.Message; fromFanFault = true; }
+        else if (s.Emergency) reason = $"Temperatur kritisch (CPU heißester Kern {s.CpuTempRaw:0} °C, GPU {s.GpuTempRaw:0} °C). Lüfter und Pumpe laufen auf 100 %.";
+        else if (_extra.DiskAlerts.Count > 0) reason = "Laufwerk zu warm: " + string.Join(", ", _extra.DiskAlerts);
+
+        var now = DateTime.UtcNow;
+        if (reason != null)
+        {
+            bool started = _alarm == null;
+            _alarm = reason;
+            _alarmClearSince = DateTime.MinValue;
+            if (started)
+            {
+                Log.Write("WARNUNG: " + reason);
+                // Lüfter-Störungen meldet der Lüfterdienst bereits selbst.
+                if (!fromFanFault && _settings.Comfort.AlarmNotify) Notify("Warnung", reason, ToolTipIcon.Warning, critical: true);
+                UpdateLightOverride();
+            }
+        }
+        else if (_alarm != null)
+        {
+            if (_alarmClearSince == DateTime.MinValue) _alarmClearSince = now;
+            else if ((now - _alarmClearSince).TotalSeconds >= 30)
+            {
+                Log.Write("Warnung aufgehoben.");
+                _alarm = null;
+                _alarmClearSince = DateTime.MinValue;
+                if (_settings.Comfort.AlarmNotify) Notify("Warnung aufgehoben", "Alle Werte sind wieder im normalen Bereich.", ToolTipIcon.Info, critical: false);
+                UpdateLightOverride();
+            }
+        }
+    }
+
+    /// <summary>Hinweis über das Tray-Symbol. Im Vollbild (Spiel/Präsentation) nur kritische Meldungen.</summary>
+    private void Notify(string title, string text, ToolTipIcon icon, bool critical)
+    {
+        if (_shutdown == 1) return;
+        if (!critical && _settings.Comfort.QuietInFullscreen && Fullscreen.IsActive())
+        {
+            Log.Write($"Hinweis im Vollbild unterdrückt: {title}: {text}");
+            return;
+        }
+        _tray.ShowBalloonTip(critical ? 10000 : 5000, title, text.Length > 250 ? text[..250] : text, icon);
+    }
+
+    private void OnSessionSwitch(object? s, SessionSwitchEventArgs e)
+    {
+        if (e.Reason is SessionSwitchReason.SessionLock) _locked = true;
+        else if (e.Reason is SessionSwitchReason.SessionUnlock) _locked = false;
+        else return;
+        Post(UpdateLightOverride);
     }
 
     // ------------------------------------------------------------------ Nachrichten der Oberfläche
@@ -243,6 +342,21 @@ internal sealed class TrayApp : ApplicationContext
                     _autostart = Autostart.IsEnabled();
                     _form?.Send("toast", new { text = ok ? ((bool)msg["enabled"]! ? "Autostart eingerichtet." : "Autostart entfernt.") : "Autostart fehlgeschlagen: " + output });
                     SendState();
+                    break;
+                }
+                case "comfort.set":
+                {
+                    var c = _settings.Comfort;
+                    if (msg["lightOffWhenLocked"] is JsonNode a) c.LightOffWhenLocked = (bool)a;
+                    if (msg["lightOffWhenDisplayOff"] is JsonNode b) c.LightOffWhenDisplayOff = (bool)b;
+                    if (msg["lightOffInSleep"] is JsonNode d) c.LightOffInSleep = (bool)d;
+                    if (msg["alarmLight"] is JsonNode e) c.AlarmLight = (bool)e;
+                    if (msg["alarmNotify"] is JsonNode f) c.AlarmNotify = (bool)f;
+                    if (msg["quietInFullscreen"] is JsonNode g) c.QuietInFullscreen = (bool)g;
+                    if (msg["trayIcon"] is JsonNode h && Enum.TryParse<TrayIconMode>((string?)h, true, out var tm)) c.TrayIcon = tm;
+                    Changed();
+                    UpdateLightOverride();
+                    UpdateTray(_fans.Snapshot);
                     break;
                 }
                 case "general.set":
@@ -401,11 +515,24 @@ internal sealed class TrayApp : ApplicationContext
 
     private void OnPower(object? s, PowerModeChangedEventArgs e)
     {
-        if (e.Mode == PowerModes.Suspend) { Log.Write("Ruhezustand"); _fans.Suspend(); }
+        if (e.Mode == PowerModes.Suspend)
+        {
+            Log.Write("Ruhezustand");
+            _fans.Suspend(); // Sicherheit zuerst: Lüfter zurück aufs BIOS
+            _sleeping = true;
+            // Licht vor dem Einschlafen ausschalten und kurz warten, bis es gesendet ist (der RAM leuchtet sonst im Standby weiter).
+            if (_settings.Comfort.LightOffInSleep)
+            {
+                bool ok = _light.SetOverrideAndWait(LightOverride.Off, "Licht aus, weil der PC im Ruhezustand ist.", 1500);
+                Log.Write("Licht vor dem Ruhezustand aus: " + (ok ? "bestätigt" : "nicht bestätigt (OpenRGB nicht verbunden?)"));
+            }
+        }
         else if (e.Mode == PowerModes.Resume)
         {
             Log.Write("Aufgewacht");
             _fans.Resume();
+            _sleeping = false;
+            Post(UpdateLightOverride);
             var t = new System.Windows.Forms.Timer { Interval = 6000 };
             t.Tick += (_, _) => { t.Dispose(); _light.Reapply(); };
             t.Start();
@@ -488,6 +615,7 @@ internal sealed class TrayApp : ApplicationContext
         try { using var stop = new EventWaitHandle(false, EventResetMode.ManualReset, Watchdog.StopEventName); stop.Set(); } catch { }
         try { _light.Dispose(); } catch { }
         try { _extra.Dispose(); } catch { }
+        try { SystemEvents.SessionSwitch -= OnSessionSwitch; _display?.Dispose(); } catch { }
         try { _fans.Dispose(); } catch { }
     }
 
@@ -500,7 +628,7 @@ internal sealed class TrayApp : ApplicationContext
     public void OnUiError(Exception ex)
     {
         Log.Write("UI-Fehler: " + ex);
-        Post(() => _tray?.ShowBalloonTip(5000, "Licht & Lüfter", "Fehler in der Oberfläche: " + ex.Message, ToolTipIcon.Error));
+        Post(() => Notify("Licht & Lüfter", "Fehler in der Oberfläche: " + ex.Message, ToolTipIcon.Error, critical: false));
     }
 
     private void ExitApp()

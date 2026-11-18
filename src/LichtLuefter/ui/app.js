@@ -42,9 +42,11 @@ if (bridge) {
 // ------------------------------------------------------------------ Texte
 
 const EFFECTS = [
-  ["static", "Statisch"], ["breathing", "Atmen"], ["colorCycle", "Farbwechsel"], ["rainbow", "Regenbogen"],
-  ["temperature", "Temperatur"], ["fire", "Feuer"], ["off", "Aus"],
+  ["static", "Statisch"], ["breathing", "Atmen"], ["pulse", "Pulsieren"], ["heartbeat", "Herzschlag"],
+  ["flash", "Blinken"], ["marquee", "Lauflicht"], ["colorCycle", "Farbwechsel"], ["twoColor", "Zwei Farben"],
+  ["rainbow", "Regenbogen"], ["temperature", "Temperatur"], ["fire", "Feuer"], ["off", "Aus"],
 ];
+const COLOR_EFFECTS = ["static", "breathing", "pulse", "heartbeat", "flash", "marquee", "twoColor"];
 const SWATCHES = ["#3FA9F5", "#FFFFFF", "#FF3B30", "#FF8A00", "#FFD60A", "#34C759", "#00C7BE", "#8E6CF0", "#FF2D92"];
 const SPEEDS = [[0, "Langsam"], [1, "Mittel"], [2, "Schnell"]];
 const SOURCES = [["cpu", "CPU"], ["gpu", "GPU"], ["max", "Höherer Wert"]];
@@ -176,9 +178,12 @@ function renderLight() {
     return b;
   }));
 
-  const needsColor = ["static", "breathing"].includes(cur.effect);
-  const animated = ["breathing", "colorCycle", "rainbow", "fire"].includes(cur.effect);
+  const needsColor = COLOR_EFFECTS.includes(cur.effect);
+  const animated = !["static", "off", "temperature"].includes(cur.effect);
   $("grpColor").hidden = !needsColor;
+  $("grpColor2").hidden = cur.effect !== "twoColor";
+  $("color2").value = (cur.color2 || "#8E6CF0").toLowerCase();
+  $("color2Label").textContent = (cur.color2 || "#8E6CF0").toUpperCase();
   $("grpTemp").hidden = cur.effect !== "temperature";
   $("grpSpeed").hidden = !animated;
   $("grpBright").hidden = cur.effect === "off";
@@ -232,6 +237,7 @@ function renderLight() {
 
 $("lightEnabled").addEventListener("change", (e) => { S.settings.light.enabled = e.target.checked; lightChanged({ enabled: e.target.checked }); });
 $("brightness").addEventListener("input", (e) => { S.settings.light.current.brightness = +e.target.value; lightChanged(); });
+$("color2").addEventListener("input", (e) => { S.settings.light.current.color2 = e.target.value.toUpperCase(); lightChanged(); });
 $("coldC").addEventListener("change", (e) => { const c = S.settings.light.current; c.coldC = Math.min(+e.target.value, c.hotC - 5); lightChanged(); });
 $("hotC").addEventListener("change", (e) => { const c = S.settings.light.current; c.hotC = Math.max(+e.target.value, c.coldC + 5); lightChanged(); });
 $("coldColor").addEventListener("input", (e) => { S.settings.light.current.coldColor = e.target.value.toUpperCase(); lightChanged(); });
@@ -258,8 +264,9 @@ function updateTempMarker() {
 function renderLightStatus() {
   const L = S.light;
   if (!L) return;
-  $("lightConn").textContent = L.connected ? (L.message || "") : (L.message || "Verbinde mit OpenRGB …") + " Startet OpenRGB gerade, verbindet sich die App von selbst.";
-  $("lightConn").classList.toggle("warn", !L.connected);
+  $("lightConn").textContent = !L.connected ? (L.message || "Verbinde mit OpenRGB …") + " Startet OpenRGB gerade, verbindet sich die App von selbst."
+    : L.note ? L.note + " Deine Einstellung bleibt gespeichert und kommt danach zurück." : (L.message || "");
+  $("lightConn").classList.toggle("warn", !L.connected || (L.note || "").startsWith("Warnung"));
   $("devices").replaceChildren(...(L.devices || []).map(d => el("tr", {}, el("td", { text: d.name }), el("td", { text: d.kind }), el("td", { text: d.mode }))));
   $("openRgbState").textContent = L.connected ? "SDK-Server verbunden." : "SDK-Server nicht erreichbar. In OpenRGB unter „SDK Server“ auf „Start Server“ klicken oder hier neu starten.";
 }
@@ -283,6 +290,7 @@ function updateLedVars() {
   const [r, g, b] = hexToRgb(base);
   document.documentElement.style.setProperty("--led", base);
   document.documentElement.style.setProperty("--led-soft", `rgba(${r}, ${g}, ${b}, .16)`);
+  document.documentElement.style.setProperty("--led2", cur.color2 || "#8E6CF0");
 }
 // Wie im Lichtdienst: Die angezeigte Temperatur folgt dem Messwert mit 6 s Zeitkonstante (sanfter Übergang).
 let tempShown = null, tempShownAt = 0;
@@ -323,6 +331,21 @@ function frame(now) {
       fire += (Math.random() - fire) * (reduceMotion ? 0 : .18 + .1 * sp);
       fill = rgbToHex(fire < .5 ? mix([120, 8, 0], [255, 70, 0], fire * 2) : mix([255, 70, 0], [255, 170, 20], (fire - .5) * 2));
       opacity = (.55 + .45 * fire) * (.25 + .75 * bright);
+    }
+    // Neue Effekte – gleiche Zeiten wie die RAM-Seite im Lichtdienst
+    else if (["flash", "heartbeat", "pulse", "marquee", "twoColor"].includes(effect)) {
+      const ph = (p) => (t / p) - Math.floor(t / p);
+      const beat = (x) => (x >= 0 && x < 1 ? Math.sin(Math.PI * x) : 0);
+      let k = 1;
+      if (reduceMotion) k = 1;
+      else if (effect === "flash") k = ph([1.6, 1.0, 0.5][sp]) < 0.5 ? 1 : 0.05;
+      else if (effect === "heartbeat") { const x = ph([1.6, 1.2, 0.85][sp]); k = Math.max(0.05, beat(x / 0.14), 0.75 * beat((x - 0.22) / 0.14)); }
+      else if (effect === "pulse") k = Math.max(0.05, Math.pow((1 - Math.cos(2 * Math.PI * t / [3.0, 1.8, 1.0][sp])) / 2, 4));
+      else if (effect === "marquee") { k = 1; rotate = reduceMotion ? 0 : (t * [3, 6, 12][sp] * 12) % 360; }
+      fill = effect === "twoColor"
+        ? rgbToHex(mix(hexToRgb(cur.color), hexToRgb(cur.color2 || "#8E6CF0"), reduceMotion ? 0 : (1 - Math.cos(2 * Math.PI * t / [24, 12, 6][sp])) / 2))
+        : effect === "marquee" ? `repeating-conic-gradient(${cur.color} 0 10deg, transparent 10deg 30deg)` : cur.color;
+      opacity = k * (.25 + .75 * bright);
     }
     for (const n of [halo, glow]) {
       n.style.background = fill;
@@ -568,6 +591,10 @@ function renderChartNow() {
 function renderSettings() {
   $("autostart").checked = S.autostart;
   $("startOpenRgb").checked = S.settings.general.startOpenRgb;
+  const c = S.settings.comfort || {};
+  for (const [id, key] of COMFORT_SWITCHES) $(id).checked = !!c[key];
+  radioGroup($("trayIcon"), [["icon", "Lüfterring"], ["cpu", "CPU-Temperatur"], ["gpu", "GPU-Temperatur"]], c.trayIcon || "cpu",
+    (v) => { S.settings.comfort.trayIcon = v; send("comfort.set", { trayIcon: v }); renderSettings(); });
   const s = S.safety;
   if (s) $("rules").replaceChildren(
     el("li", { text: `Die Pumpe (PUMP_FAN1) läuft nie unter ${s.pumpMin} %. Fällt ihre Drehzahl unter 1000 U/min, übernimmt sofort das BIOS und du bekommst eine Meldung.` }),
@@ -581,6 +608,10 @@ function renderSettings() {
 }
 $("autostart").addEventListener("change", (e) => send("autostart.set", { enabled: e.target.checked }));
 $("startOpenRgb").addEventListener("change", (e) => send("general.set", { startOpenRgb: e.target.checked }));
+const COMFORT_SWITCHES = [["cLocked", "lightOffWhenLocked"], ["cDisplay", "lightOffWhenDisplayOff"], ["cSleep", "lightOffInSleep"],
+  ["cAlarmLight", "alarmLight"], ["cAlarmNotify", "alarmNotify"], ["cQuiet", "quietInFullscreen"]];
+for (const [id, key] of COMFORT_SWITCHES)
+  $(id).addEventListener("change", (e) => { S.settings.comfort[key] = e.target.checked; send("comfort.set", { [key]: e.target.checked }); });
 $("restartOpenRgb").addEventListener("click", () => send("openrgb.restart"));
 $("openBackups").addEventListener("click", (e) => { e.preventDefault(); send("open.folder", { which: "backups" }); });
 $("openLogs").addEventListener("click", () => send("open.folder", { which: "logs" }));

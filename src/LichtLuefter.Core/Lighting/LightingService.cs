@@ -4,7 +4,11 @@ using LichtLuefter.Core.Settings;
 namespace LichtLuefter.Core.Lighting;
 
 public sealed record LightDeviceInfo(string Name, string Kind, string Mode);
-public sealed record LightSnapshot(bool Connected, string Message, IReadOnlyList<LightDeviceInfo> Devices, string PreviewColor);
+/// <param name="Note">Grund, falls das Licht gerade vorübergehend übersteuert ist (aus/Warnung), sonst leer.</param>
+public sealed record LightSnapshot(bool Connected, string Message, IReadOnlyList<LightDeviceInfo> Devices, string PreviewColor, string Note = "");
+
+/// <summary>Vorübergehende Übersteuerung – ändert die gespeicherte Einstellung nicht.</summary>
+public enum LightOverride { None, Off, Alarm }
 
 /// <summary>
 /// Beleuchtung über den OpenRGB-SDK-Server.
@@ -56,6 +60,43 @@ public sealed class LightingService : IDisposable
         _dirty = true;
     }
 
+    private volatile LightOverride _override = LightOverride.None;
+    private string _overrideNote = "";
+    private readonly ManualResetEventSlim _applied = new(false);
+
+    /// <summary>Licht vorübergehend aus oder Warnung (rot pulsierend); None stellt die eigene Einstellung wieder her.</summary>
+    public void SetOverride(LightOverride o, string note)
+    {
+        if (_override == o && _overrideNote == note) return;
+        _override = o;
+        _overrideNote = note;
+        _applied.Reset();
+        _dirty = true;
+        Log.Write($"Licht-Übersteuerung: {o} {note}");
+        Snapshot = Snapshot with { Note = o == LightOverride.None ? "" : note };
+        try { Updated?.Invoke(Snapshot); } catch { }
+    }
+
+    /// <summary>Wie SetOverride, wartet aber, bis es an die Geräte gesendet ist (für den Ruhezustand).</summary>
+    public bool SetOverrideAndWait(LightOverride o, string note, int timeoutMs)
+    {
+        SetOverride(o, note);
+        return _client?.IsConnected == true && _applied.Wait(timeoutMs);
+    }
+
+    /// <summary>Was tatsächlich gezeigt wird: eigene Einstellung oder Übersteuerung.</summary>
+    private LightSettings Effective()
+    {
+        var s = _settings;
+        return _override switch
+        {
+            LightOverride.Off => new LightSettings { Enabled = false, Current = s.Current, Saved = s.Saved },
+            LightOverride.Alarm => new LightSettings { Enabled = true, Saved = s.Saved, Current = new LightProfile
+                { Name = "Warnung", Effect = LightEffect.Breathing, Color = "#FF0000", Speed = 2, Brightness = 100 } },
+            _ => s,
+        };
+    }
+
     /// <summary>Nach Ruhezustand oder OpenRGB-Neustart alles neu senden.</summary>
     public void Reapply() { _dirty = true; _nextConnect = DateTime.MinValue; }
 
@@ -97,10 +138,12 @@ public sealed class LightingService : IDisposable
                         Enumerate();
                         VerifyBoard();
                     }
-                    var s = _settings;
+                    var s = Effective();
                     double t = (DateTime.UtcNow - start).TotalSeconds;
+                    bool applying = _dirty;
                     if (_dirty) { _dirty = false; ApplyBoard(s, t); _lastRamFrames.Clear(); }
                     RenderFrame(s, t);
+                    if (applying) _applied.Set();
                     if (!Animated(s)) sleep = 250;
                 }
             }
@@ -124,7 +167,7 @@ public sealed class LightingService : IDisposable
             .Select(d => $"{d!.Index}:{d.Type}:{d.Name}:{d.Location}:{d.Leds.Count}"));
 
     // Temperatur-Effekt wird laufend nachgeführt (sanfter Übergang) und zählt deshalb als "animiert".
-    private static bool Animated(LightSettings s) => s.Enabled && s.Current.Effect is LightEffect.Breathing or LightEffect.ColorCycle or LightEffect.Rainbow or LightEffect.Fire or LightEffect.Temperature;
+    private static bool Animated(LightSettings s) => s.Enabled && s.Current.Effect is not (LightEffect.Static or LightEffect.Off);
 
     private void TryConnect()
     {
@@ -169,10 +212,15 @@ public sealed class LightingService : IDisposable
         [LightEffect.Off] = ["Static"],
         [LightEffect.Breathing] = ["Breathing"],
         [LightEffect.Rainbow] = ["Rainbow wave", "Rainbow Wave", "Rainbow"],
+        [LightEffect.Flash] = ["Flashing"],
+        [LightEffect.Heartbeat] = ["Double flashing"],
+        [LightEffect.Pulse] = ["Color pulse"],
+        [LightEffect.Marquee] = ["Marquee"],
+        [LightEffect.TwoColor] = ["Static"],
     };
 
     /// <summary>Effekte, bei denen die App die Board-Farbe laufend selbst setzt (Hardware-Modus Static).</summary>
-    private static bool BoardSoftware(LightEffect e) => e is LightEffect.Temperature or LightEffect.ColorCycle or LightEffect.Fire;
+    private static bool BoardSoftware(LightEffect e) => e is LightEffect.Temperature or LightEffect.ColorCycle or LightEffect.Fire or LightEffect.TwoColor;
 
     /// <summary>Farbwechsel in Grad Farbton pro Sekunde (langsam/mittel/schnell) – Board und RAM synchron.</summary>
     private static readonly double[] CycleDegPerSec = [6, 15, 36];
@@ -278,6 +326,7 @@ public sealed class LightingService : IDisposable
         LightEffect.Temperature => TempColor(p),
         LightEffect.ColorCycle => RgbColor.FromHsv(t * CycleDegPerSec[Math.Clamp(p.Speed, 0, 2)], 1, 1),
         LightEffect.Fire => EmberColor(p, t),
+        LightEffect.TwoColor => RgbColor.Lerp(RgbColor.FromHex(p.Color), RgbColor.FromHex(p.Color2), (1 - Math.Cos(2 * Math.PI * t / TwoColorPeriod[Math.Clamp(p.Speed, 0, 2)])) / 2),
         _ => RgbColor.FromHex(p.Color),
     };
 
@@ -323,6 +372,23 @@ public sealed class LightingService : IDisposable
         }
     }
 
+    // Zeiten je Tempo (langsam/mittel/schnell) für die RAM-Seite der neuen Effekte. Das Board nutzt seinen
+    // Hardware-Modus mit Tempo 0–2; beide laufen ähnlich schnell, aber nicht phasengleich.
+    private static readonly double[] FlashPeriod = [1.6, 1.0, 0.5];
+    private static readonly double[] HeartPeriod = [1.6, 1.2, 0.85];
+    private static readonly double[] PulsePeriod = [3.0, 1.8, 1.0];
+    private static readonly double[] MarqueeLedsPerSec = [3, 6, 12];
+    private static readonly double[] TwoColorPeriod = [24, 12, 6];
+
+    private static double Phase(double t, double period) => t / period - Math.Floor(t / period);
+
+    /// <summary>Zwei kurze Schläge am Anfang jeder Periode, dann Pause.</summary>
+    private static double HeartbeatLevel(double ph)
+    {
+        static double Beat(double x) => x is >= 0 and < 1 ? Math.Sin(Math.PI * x) : 0;
+        return Math.Max(Beat(ph / 0.14), 0.75 * Beat((ph - 0.22) / 0.14));
+    }
+
     private void RenderFrame(LightSettings s, double t)
     {
         var p = s.Current;
@@ -349,6 +415,11 @@ public sealed class LightingService : IDisposable
                     LightEffect.ColorCycle => RgbColor.FromHsv(t * CycleDegPerSec[(int)speed], 1, bright),
                     LightEffect.Rainbow => RgbColor.FromHsv(t * (new[] { 30.0, 70, 140 })[(int)speed] + i * 360.0 / n + module * 18, 1, bright),
                     LightEffect.Fire => FireColor(i, bright),
+                    LightEffect.Flash => baseColor.Scale(bright * (Phase(t, FlashPeriod[(int)speed]) < 0.5 ? 1 : 0)),
+                    LightEffect.Heartbeat => baseColor.Scale(bright * Math.Max(0.04, HeartbeatLevel(Phase(t, HeartPeriod[(int)speed])))),
+                    LightEffect.Pulse => baseColor.Scale(bright * Math.Max(0.04, Math.Pow((1 - Math.Cos(2 * Math.PI * t / PulsePeriod[(int)speed])) / 2, 4))),
+                    LightEffect.Marquee => baseColor.Scale(bright * (((i + (int)Math.Floor(t * MarqueeLedsPerSec[(int)speed])) % 3 == 0) ? 1 : 0.06)),
+                    LightEffect.TwoColor => RgbColor.Lerp(baseColor, RgbColor.FromHex(p.Color2), (1 - Math.Cos(2 * Math.PI * t / TwoColorPeriod[(int)speed])) / 2).Scale(bright),
                     _ => baseColor,
                 };
             }

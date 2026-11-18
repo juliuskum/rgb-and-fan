@@ -17,6 +17,27 @@ internal static class Autostart
         return r.code == 0;
     }
 
+    /// <summary>
+    /// Zeigt die Autostart-Aufgabe auf ein anderes Programm (z. B. nach Installation oder Umzug von dist\ nach
+    /// „Programme“), wird sie auf den aktuellen Pfad umgestellt.
+    /// </summary>
+    public static void EnsureCurrentPath()
+    {
+        try
+        {
+            var r = RunSchtasks($"/Query /TN \"{TaskName}\" /XML");
+            if (r.code != 0) return;
+            var m = System.Text.RegularExpressions.Regex.Match(r.output, "<Command>(.*?)</Command>");
+            var cmd = System.Net.WebUtility.HtmlDecode(m.Groups[1].Value).Trim('"');
+            if (m.Success && !string.Equals(Path.GetFullPath(cmd), Path.GetFullPath(Environment.ProcessPath!), StringComparison.OrdinalIgnoreCase))
+            {
+                Log.Write($"Autostart zeigte auf {cmd} – stelle auf {Environment.ProcessPath} um.");
+                Set(true);
+            }
+        }
+        catch (Exception ex) { Log.Write("Autostart prüfen: " + ex.Message); }
+    }
+
     public static (bool ok, string message) Set(bool enable)
     {
         if (!enable)
@@ -76,6 +97,57 @@ internal static class Autostart
         var o = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
         p.WaitForExit(10000);
         return (p.ExitCode, o.Trim());
+    }
+}
+
+/// <summary>Deinstallation (aufgerufen über „Apps &amp; Features“ mit --uninstall). Die Installation macht tools\install.ps1.</summary>
+internal static class Installer
+{
+    public const string UninstallKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LichtLuefter";
+    public const string ShortcutName = "Licht & Lüfter.lnk";
+
+    public static int Uninstall(bool quiet)
+    {
+        Log.Prefix = "uninstall";
+        if (!quiet && MessageBox.Show("Licht & Lüfter deinstallieren?\n\nDie Lüfter laufen danach wieder nach den BIOS-Kurven. Die Beleuchtung bleibt im letzten Zustand.",
+                "Licht & Lüfter", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            return 1;
+
+        // 1. Laufende App sauber beenden (stellt die Lüfter selbst aufs BIOS zurück).
+        try { EventWaitHandle.OpenExisting(Program.ExitEventName).Set(); } catch { }
+        var until = DateTime.UtcNow.AddSeconds(20);
+        while (DateTime.UtcNow < until && Process.GetProcessesByName("LichtLuefter").Any(p => p.Id != Environment.ProcessId)) Thread.Sleep(250);
+        if (Process.GetProcessesByName("LichtLuefter").Any(p => p.Id != Environment.ProcessId))
+        {
+            if (!quiet) MessageBox.Show("Licht & Lüfter läuft noch und ließ sich nicht beenden. Bitte über das Tray-Symbol beenden und erneut deinstallieren.",
+                "Licht & Lüfter", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return 1;
+        }
+
+        // 2. Sicherheitsnetz: hinterließ ein Absturz noch gesteuerte Kanäle, jetzt zurückstellen.
+        if (LichtLuefter.Core.Fans.FanStateFile.Load() is { } st) { st.OwnerPid = -1; LichtLuefter.Core.Fans.Watchdog.RestoreFromStateFile(st); }
+
+        // 3. Autostart, Verknüpfungen, Eintrag in „Apps & Features“
+        try { Autostart.Set(false); } catch { }
+        foreach (var dir in new[] { Environment.GetFolderPath(Environment.SpecialFolder.CommonPrograms), Environment.GetFolderPath(Environment.SpecialFolder.Programs) })
+            try { File.Delete(Path.Combine(dir, ShortcutName)); } catch { }
+        try { Microsoft.Win32.Registry.LocalMachine.DeleteSubKeyTree(UninstallKey, false); } catch { }
+
+        // 4. Einstellungen, Protokolle, Sicherungen der OpenRGB-Konfiguration: nur auf Wunsch löschen.
+        if (!quiet && MessageBox.Show($"Auch Einstellungen, Protokolle und die Sicherungen der OpenRGB-Konfiguration löschen?\n\n{AppPaths.Root}",
+                "Licht & Lüfter", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) == DialogResult.Yes)
+            try { Directory.Delete(AppPaths.Root, true); } catch { }
+
+        // 5. Programmordner verzögert löschen – nur, wenn wir wirklich in „Programme\LichtLuefter“ liegen.
+        var appDir = Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory);
+        var expected = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "LichtLuefter");
+        if (string.Equals(appDir, expected, StringComparison.OrdinalIgnoreCase))
+        {
+            Process.Start(new ProcessStartInfo("cmd.exe", $"/c ping 127.0.0.1 -n 4 > nul & rmdir /s /q \"{appDir}\"")
+            { CreateNoWindow = true, UseShellExecute = false, WorkingDirectory = Path.GetTempPath() });
+        }
+        if (!quiet) MessageBox.Show("Licht & Lüfter wurde entfernt.", "Licht & Lüfter", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        return 0;
     }
 }
 

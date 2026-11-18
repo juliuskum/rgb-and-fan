@@ -37,6 +37,13 @@ internal static class Program
             return Watchdog.Run(pid);
 
         // Notfall: alle Kanäle sofort zurück auf BIOS (auch ohne laufende App).
+        // Deinstallation (aus „Apps & Features“).
+        if (args.Contains("--uninstall"))
+        {
+            ApplicationConfiguration.Initialize();
+            return Installer.Uninstall(quiet: args.Contains("--quiet"));
+        }
+
         if (args.Contains("--restore-bios"))
             return EmergencyRestore(quiet: args.Contains("--quiet"));
 

@@ -66,6 +66,9 @@
       <fieldset class="group" id="grpColor">
         <legend>Farbe</legend>
         <div class="swatches" id="swatches"></div>
+        <div class="color2-row" id="grpColor2" hidden>
+          <label class="custom-color"><input type="color" id="color2" aria-label="Zweite Farbe"><span>Zweite Farbe <span id="color2Label"></span></span></label>
+        </div>
       </fieldset>
 
       <fieldset class="group" id="grpTemp">
@@ -150,6 +153,33 @@
       <div class="group">
         <label class="switch"><input type="checkbox" id="autostart"><span class="track"></span><span class="switch-text">Beim Anmelden im Tray starten</span></label>
         <p class="hint">Richtet eine Aufgabe in der Windows-Aufgabenplanung ein, damit die App ohne UAC-Abfrage mit Adminrechten startet.</p>
+      </div>
+
+      <div class="group">
+        <h3>Licht automatisch ausschalten</h3>
+        <div class="switch-list">
+          <label class="switch"><input type="checkbox" id="cLocked"><span class="track"></span><span class="switch-text">Wenn der PC gesperrt ist</span></label>
+          <label class="switch"><input type="checkbox" id="cDisplay"><span class="track"></span><span class="switch-text">Wenn der Bildschirm ausgeht</span></label>
+          <label class="switch"><input type="checkbox" id="cSleep"><span class="track"></span><span class="switch-text">Im Ruhezustand (sonst leuchtet der RAM weiter)</span></label>
+        </div>
+        <p class="hint">Danach kommt automatisch deine eingestellte Beleuchtung zurück.</p>
+      </div>
+
+      <div class="group">
+        <h3>Warnungen</h3>
+        <div class="switch-list">
+          <label class="switch"><input type="checkbox" id="cAlarmLight"><span class="track"></span><span class="switch-text">Beleuchtung pulsiert rot</span></label>
+          <label class="switch"><input type="checkbox" id="cAlarmNotify"><span class="track"></span><span class="switch-text">Windows-Benachrichtigung</span></label>
+        </div>
+        <p class="hint">Bei kritischer CPU- oder GPU-Temperatur, bei einer Störung der Lüfter oder Pumpe und wenn ein Laufwerk seine eigene Warngrenze erreicht. Die Warnung endet, wenn 30 Sekunden lang alles wieder normal ist.</p>
+      </div>
+
+      <div class="group">
+        <h3>Hinweise und Tray-Symbol</h3>
+        <label class="switch"><input type="checkbox" id="cQuiet"><span class="track"></span><span class="switch-text">Im Vollbild nicht stören</span></label>
+        <p class="hint">Während eines Spiels oder einer Präsentation im Vollbild erscheinen nur Warnungen.</p>
+        <div class="seg" id="trayIcon" role="radiogroup" aria-label="Tray-Symbol"></div>
+        <p class="hint">Das Tray-Symbol zeigt die CPU-Temperatur (Durchschnitt aller Kerne), die GPU-Temperatur oder den Lüfterring. Farbe: blau unter 60 °C, gelb unter 80 °C, sonst rot.</p>
       </div>
 
       <div class="group">

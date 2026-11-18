@@ -375,3 +375,12 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 18p
   .charts, .mon-groups { grid-template-columns: 1fr; }
 }
 .chart h3 .unit { color: var(--muted); font-weight: 400; font-family: var(--f-text); font-size: 13px; }
+
+/* Neue Effekte: Vorschau-Streifen */
+.chip-pulse { background: radial-gradient(circle at 50% 50%, var(--led) 0 30%, transparent 70%); }
+.chip-heartbeat { background: linear-gradient(90deg, transparent 0 10%, var(--led) 10% 22%, transparent 22% 30%, var(--led) 30% 40%, transparent 40%); }
+.chip-flash { background: repeating-linear-gradient(90deg, var(--led) 0 18%, transparent 18% 36%); }
+.chip-marquee { background: repeating-linear-gradient(90deg, var(--led) 0 8%, transparent 8% 24%); }
+.chip-twoColor { background: linear-gradient(90deg, var(--led), var(--led2, #8E6CF0)); }
+.color2-row { margin-top: 12px; }
+.switch-list { display: grid; gap: 10px; margin: 4px 0 6px; }
