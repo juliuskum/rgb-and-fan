@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>LichtLuefter.Core</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Version fest gepinnt: der Watchdog nutzt interne Felder dieser Version (siehe FanHardware.cs). -->
+    <PackageReference Include="LibreHardwareMonitorLib" Version="[0.9.6]" />
+  </ItemGroup>
+</Project>

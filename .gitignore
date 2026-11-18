@@ -1,0 +1,12 @@
+# Lokales .NET SDK (per dotnet-install.ps1 nach .tools\dotnet installiert, siehe README)
+.tools/
+# Build-Ausgaben
+dist/
+**/bin/
+**/obj/
+# Messprotokolle, Testskripte und Sicherungen persönlicher Einstellungen
+artifacts/
+# IDE
+.vs/
+.vscode/
+*.user

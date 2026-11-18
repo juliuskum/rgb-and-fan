@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'">
+  <title>Licht &amp; Lüfter</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="app">
+
+  <aside class="instrument" aria-label="Live-Zustand">
+    <h1 class="brand">Licht &amp; Lüfter</h1>
+
+    <div class="fan" id="fan" aria-hidden="true">
+      <div class="fan-frame">
+        <span class="screw s1"></span><span class="screw s2"></span><span class="screw s3"></span><span class="screw s4"></span>
+      </div>
+      <div class="halo-glow" id="haloGlow"></div>
+      <div class="halo" id="halo"></div>
+      <svg class="blades" id="blades" viewBox="-100 -100 200 200"></svg>
+      <div class="hub"></div>
+    </div>
+
+    <div class="temps">
+      <div class="temp" id="tCpu">
+        <span class="temp-label">CPU</span>
+        <span class="temp-value"><span class="num">–</span><span class="unit">°C</span></span>
+        <span class="temp-bar"><span></span></span>
+      </div>
+      <div class="temp" id="tGpu">
+        <span class="temp-label">GPU</span>
+        <span class="temp-value"><span class="num">–</span><span class="unit">°C</span></span>
+        <span class="temp-bar"><span></span></span>
+      </div>
+    </div>
+
+    <ul class="headers" id="headerList"></ul>
+    <p class="empty-headers" id="emptyHeaders"></p>
+
+    <div class="control-line" id="controlLine" role="status" aria-live="polite"></div>
+  </aside>
+
+  <main>
+    <nav class="tabs" role="tablist" aria-label="Bereiche">
+      <button role="tab" id="tabbtn-light" aria-controls="tab-light" aria-selected="true">Licht</button>
+      <button role="tab" id="tabbtn-fans" aria-controls="tab-fans" aria-selected="false">Lüfter</button>
+      <button role="tab" id="tabbtn-settings" aria-controls="tab-settings" aria-selected="false">Einstellungen</button>
+    </nav>
+
+    <!-- ============================ Licht ============================ -->
+    <section class="tab" id="tab-light" role="tabpanel" aria-labelledby="tabbtn-light">
+      <div class="row-head">
+        <h2>Beleuchtung</h2>
+        <label class="switch"><input type="checkbox" id="lightEnabled"><span class="track"></span><span class="switch-text">An</span></label>
+      </div>
+      <p class="hint" id="lightConn"></p>
+
+      <fieldset class="group">
+        <legend>Effekt</legend>
+        <div class="effects" id="effects" role="radiogroup"></div>
+      </fieldset>
+
+      <fieldset class="group" id="grpColor">
+        <legend>Farbe</legend>
+        <div class="swatches" id="swatches"></div>
+      </fieldset>
+
+      <fieldset class="group" id="grpTemp">
+        <legend>Farbe nach Temperatur</legend>
+        <div class="seg" id="tempSource" role="radiogroup" aria-label="Temperaturquelle"></div>
+        <div class="temp-range">
+          <label>Kalt bis <input type="number" id="coldC" min="20" max="95" step="1"> °C</label>
+          <input type="color" id="coldColor" aria-label="Farbe kalt">
+          <span class="gradient" id="tempGradient"><span class="marker" id="tempMarker"></span></span>
+          <input type="color" id="hotColor" aria-label="Farbe heiß">
+          <label>heiß ab <input type="number" id="hotC" min="25" max="100" step="1"> °C</label>
+        </div>
+      </fieldset>
+
+      <div class="two">
+        <fieldset class="group" id="grpBright">
+          <legend>Helligkeit</legend>
+          <div class="slider-row"><input type="range" id="brightness" min="0" max="100" step="5"><output id="brightnessOut"></output></div>
+        </fieldset>
+        <fieldset class="group" id="grpSpeed">
+          <legend>Tempo</legend>
+          <div class="seg" id="speed" role="radiogroup" aria-label="Tempo"></div>
+        </fieldset>
+      </div>
+
+      <fieldset class="group">
+        <legend>Lichtprofile</legend>
+        <ul class="profiles" id="lightProfiles"></ul>
+        <form class="save-row" id="saveProfileForm">
+          <input type="text" id="profileName" placeholder="Name für die aktuelle Einstellung" maxlength="40" aria-label="Profilname">
+          <button type="submit" class="btn">Als Profil speichern</button>
+        </form>
+      </fieldset>
+
+      <table class="devices" id="devices" aria-label="Geräte in OpenRGB"></table>
+    </section>
+
+    <!-- ============================ Lüfter ============================ -->
+    <section class="tab" id="tab-fans" role="tabpanel" aria-labelledby="tabbtn-fans" hidden>
+      <h2>Lüfterprofil</h2>
+      <div class="seg seg-big" id="fanProfiles" role="radiogroup" aria-label="Lüfterprofil"></div>
+      <p class="hint" id="fanProfileHint"></p>
+
+      <div class="group curves">
+        <div class="row-head">
+          <h3>Kurven</h3>
+          <label class="inline">Profil
+            <select id="editProfile"></select>
+          </label>
+        </div>
+        <div class="seg" id="curveKey" role="radiogroup" aria-label="Kurve"></div>
+        <div class="chart-wrap">
+          <svg id="chart" viewBox="0 0 640 300" role="img" aria-label="Lüfterkurve"></svg>
+        </div>
+        <p class="hint" id="curveHint">Punkte ziehen, oder Punkt anklicken und mit den Pfeiltasten verschieben. Es zählt jeweils der höhere Wert aus CPU- und GPU-Kurve. CPU-Temperatur ist hier der Durchschnitt aller Kerne.</p>
+        <p class="hint" id="pumpHint" hidden>Gemessen: Die Pumpe dreht schon bei 70 % mit voller Drehzahl (≈ 2850 U/min). Höhere Werte ändern an der Pumpe praktisch nichts.</p>
+        <button class="btn btn-quiet" id="resetCurves">Kurven dieses Profils zurücksetzen</button>
+      </div>
+
+      <div class="group">
+        <h3>Anschlüsse</h3>
+        <table class="channels" id="channels"></table>
+        <p class="hint">Nicht geregelte Anschlüsse bleiben immer bei der BIOS-Kurve. PUMP_FAN1 wird immer als Pumpe behandelt.</p>
+      </div>
+    </section>
+
+    <!-- ============================ Einstellungen ============================ -->
+    <section class="tab" id="tab-settings" role="tabpanel" aria-labelledby="tabbtn-settings" hidden>
+      <h2>Einstellungen</h2>
+
+      <div class="group">
+        <label class="switch"><input type="checkbox" id="autostart"><span class="track"></span><span class="switch-text">Beim Anmelden im Tray starten</span></label>
+        <p class="hint">Richtet eine Aufgabe in der Windows-Aufgabenplanung ein, damit die App ohne UAC-Abfrage mit Adminrechten startet.</p>
+      </div>
+
+      <div class="group">
+        <h3>OpenRGB</h3>
+        <label class="switch"><input type="checkbox" id="startOpenRgb"><span class="track"></span><span class="switch-text">OpenRGB bei Bedarf mit SDK-Server starten</span></label>
+        <p class="hint" id="openRgbState"></p>
+        <button class="btn" id="restartOpenRgb">OpenRGB mit SDK-Server neu starten</button>
+        <p class="hint">Die App ändert keine OpenRGB-Einstellungen. Vor jedem Start, den sie auslöst, sichert sie %APPDATA%\OpenRGB. <a href="#" id="openBackups">Sicherungen öffnen</a></p>
+      </div>
+
+      <div class="group" id="conflictGroup" hidden>
+        <h3>Andere Programme</h3>
+        <p class="warn" id="conflicts"></p>
+      </div>
+
+      <div class="group">
+        <h3>Sicherheit</h3>
+        <ul class="rules" id="rules"></ul>
+      </div>
+
+      <div class="group">
+        <h3>Diagnose</h3>
+        <p class="hint" id="hwInfo"></p>
+        <div class="btn-row">
+          <button class="btn btn-quiet" id="openLogs">Protokolle öffnen</button>
+          <button class="btn btn-danger" id="exitApp">App beenden</button>
+        </div>
+        <p class="hint">Beenden stellt alle Lüfter auf die BIOS-Kurven zurück. Das Licht bleibt im zuletzt gesetzten Zustand.</p>
+      </div>
+    </section>
+  </main>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script src="app.js"></script>
+</body>
+</html>
