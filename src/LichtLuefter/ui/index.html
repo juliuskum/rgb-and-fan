@@ -46,6 +46,7 @@
     <nav class="tabs" role="tablist" aria-label="Bereiche">
       <button role="tab" id="tabbtn-light" aria-controls="tab-light" aria-selected="true">Licht</button>
       <button role="tab" id="tabbtn-fans" aria-controls="tab-fans" aria-selected="false">Lüfter</button>
+      <button role="tab" id="tabbtn-monitor" aria-controls="tab-monitor" aria-selected="false">Monitor</button>
       <button role="tab" id="tabbtn-settings" aria-controls="tab-settings" aria-selected="false">Einstellungen</button>
     </nav>
 
@@ -129,6 +130,17 @@
         <table class="channels" id="channels"></table>
         <p class="hint">Nicht geregelte Anschlüsse bleiben immer bei der BIOS-Kurve. PUMP_FAN1 wird immer als Pumpe behandelt.</p>
       </div>
+    </section>
+
+    <!-- ============================ Monitor ============================ -->
+    <section class="tab tab-wide" id="tab-monitor" role="tabpanel" aria-labelledby="tabbtn-monitor" hidden>
+      <div class="row-head">
+        <h2>Hardwaremonitor</h2>
+        <button class="btn btn-quiet" id="resetMinMax" type="button">Minimum und Maximum zurücksetzen</button>
+      </div>
+      <p class="hint">Verlauf der letzten 5 Minuten, eine Messung pro Sekunde. Minimum und Maximum zählen seit dem Start der App oder dem letzten Zurücksetzen.</p>
+      <div class="charts" id="charts"></div>
+      <div class="mon-groups" id="monGroups"></div>
     </section>
 
     <!-- ============================ Einstellungen ============================ -->

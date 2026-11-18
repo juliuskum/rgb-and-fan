@@ -13,9 +13,11 @@ public sealed class FanHeader
 
 /// <summary>
 /// Liest Temperaturen und Lüfter über LibreHardwareMonitorLib.
-/// Nur CPU, GPU und Mainboard (Super-I/O über LPC) sind aktiv. Bewusst AUS: Speicher (SPD über SMBus –
-/// würde mit OpenRGBs RAM-Beleuchtung auf demselben Bus konkurrieren), Controller, Netzwerk, Laufwerke.
-/// Alle Aufrufe müssen aus demselben Thread kommen.
+/// Aktiv: CPU, GPU, Mainboard (Super-I/O über LPC) und Laufwerke. Bewusst AUS: Speicher (SPD über SMBus –
+/// würde mit OpenRGBs RAM-Beleuchtung auf demselben Bus konkurrieren), Controller, Netzwerk.
+/// Alle Aufrufe müssen aus demselben Thread kommen – Ausnahme: die Laufwerke, die ausschließlich der
+/// Laufwerksthread aktualisiert. Es darf nur EINE LHM-Instanz pro Prozess geben: LHM hält Mutexe und
+/// Treiberzugang statisch, Close() einer zweiten Instanz würde sie auch dieser entziehen.
 /// </summary>
 public sealed class HardwareMonitor : IDisposable
 {
@@ -27,7 +29,8 @@ public sealed class HardwareMonitor : IDisposable
         IsMemoryEnabled = false,
         IsControllerEnabled = false,
         IsNetworkEnabled = false,
-        IsStorageEnabled = false,
+        // Laufwerke: aktiv, aber NUR vom eigenen Laufwerksthread aktualisiert (siehe UpdateRaw/ExtraMonitor).
+        IsStorageEnabled = true,
         IsPsuEnabled = false,
         IsBatteryEnabled = false,
         IsPowerMonitorEnabled = false,
@@ -51,6 +54,12 @@ public sealed class HardwareMonitor : IDisposable
     public string GpuName { get; private set; } = "";
     public string BoardName { get; private set; } = "";
     public bool IsOpen { get; private set; }
+
+    /// <summary>LHM-Hardwarebaum (nur im besitzenden Thread benutzen) – für den Hardwaremonitor.</summary>
+    public IEnumerable<IHardware> Hardware => _computer.Hardware;
+
+    /// <summary>Laufwerke (nur vom Laufwerksthread aktualisieren, siehe <see cref="ExtraMonitor"/>).</summary>
+    public List<IHardware> StorageHardware { get; private set; } = new();
 
     public void Open()
     {
@@ -94,6 +103,7 @@ public sealed class HardwareMonitor : IDisposable
         }
 
         SuperIo = SuperIoAccess.Find(_computer);
+        StorageHardware = _computer.Hardware.Where(h => h.HardwareType == HardwareType.Storage).ToList();
         foreach (var (idx, cs) in _controlSensors.OrderBy(k => k.Key))
             Headers.Add(new FanHeader { Index = idx, Name = cs.Name });
         Update();
@@ -113,6 +123,8 @@ public sealed class HardwareMonitor : IDisposable
     {
         foreach (var hw in _computer.Hardware)
         {
+            // Laufwerke nie im Regelthread: ein Laufwerk im Standby kann die Abfrage für Sekunden blockieren.
+            if (hw.HardwareType == HardwareType.Storage) continue;
             hw.Update();
             foreach (var sub in hw.SubHardware) sub.Update();
         }

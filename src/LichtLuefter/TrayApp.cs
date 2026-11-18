@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using LichtLuefter.Core;
 using LichtLuefter.Core.Fans;
+using LichtLuefter.Core.Hardware;
 using LichtLuefter.Core.Lighting;
 using LichtLuefter.Core.Settings;
 using Microsoft.Win32;
@@ -18,6 +19,7 @@ internal sealed class TrayApp : ApplicationContext
 
     private readonly FanService _fans;
     private readonly LightingService _light;
+    private readonly ExtraMonitor _extra;
     private readonly NotifyIcon _tray;
     private readonly Control _invoker = new();
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 5000 };
@@ -43,9 +45,11 @@ internal sealed class TrayApp : ApplicationContext
         _lastBackup = OpenRgbBackup.Run();
 
         _fans = new FanService(() => _fanCopy);
-        _fans.Updated += snap => Post(() => { _form?.Send("fan", snap); UpdateTray(snap); });
+        _fans.Updated += snap => Post(() => { _form?.Send("fan", snap); UpdateTray(snap); SendMonitor(); });
         _fans.Alert += msg => Post(() => _tray?.ShowBalloonTip(8000, "Lüfter", msg, ToolTipIcon.Warning));
         _fans.Start();
+        _extra = new ExtraMonitor(() => _fans.StorageHardware);
+        _extra.Start();
         _watchdog = WatchdogLauncher.Start();
 
         _light = new LightingService(Clone(_settings.Light), () => _generalCopy, () => (_fans.Snapshot.CpuTemp, _fans.Snapshot.GpuTemp));
@@ -88,8 +92,11 @@ internal sealed class TrayApp : ApplicationContext
             _form = new MainForm(HandleMessage);
             _form.FormClosed += (_, _) => _form = null;
         }
+        bool wasHidden = !_form.Visible;
         _form.Show();
         if (_form.WindowState == FormWindowState.Minimized) _form.WindowState = FormWindowState.Normal;
+        // Solange das Fenster versteckt war, gingen keine Monitordaten raus – Verlauf vollständig nachliefern.
+        if (wasHidden) _form.Send("monitorHistory", _fans.MonitorHistory());
         _form.Activate();
     }
 
@@ -158,6 +165,7 @@ internal sealed class TrayApp : ApplicationContext
                     SendState();
                     _form?.Send("fan", _fans.Snapshot);
                     _form?.Send("light", _light.Snapshot);
+                    _form?.Send("monitorHistory", _fans.MonitorHistory());
                     break;
                 case "light.set":
                     _settings.Light.Current = msg["profile"].Deserialize<LightProfile>(AppSettings.Json) ?? _settings.Light.Current;
@@ -221,6 +229,11 @@ internal sealed class TrayApp : ApplicationContext
                     Changed();
                     break;
                 }
+                case "monitor.reset":
+                    _fans.ResetMonitorMinMax();
+                    _extra.ResetMinMax();
+                    _form?.Send("toast", new { text = "Minimum und Maximum zurückgesetzt." });
+                    break;
                 case "fan.retry":
                     _fans.ClearFault();
                     break;
@@ -315,6 +328,16 @@ internal sealed class TrayApp : ApplicationContext
         _light.Apply(Clone(_settings.Light));
         if (rebuildMenu) BuildMenu();
         SendState();
+    }
+
+    /// <summary>Hardwaremonitor an die Oberfläche: aktuelle Gruppen + neuer Verlaufspunkt (1×/s, nur bei offenem Fenster).</summary>
+    private void SendMonitor()
+    {
+        if (_form == null || !_form.Visible) return;
+        string[] order = ["cpu", "gpu", "ram", "fans", "board"];
+        var groups = _fans.MonitorGroups.Concat(_extra.Groups)
+            .OrderBy(g => Array.IndexOf(order, g.Id) is var i && i >= 0 ? i : 50).ToList();
+        _form.Send("monitor", new { groups, sample = _fans.LastSample });
     }
 
     private void FlushSave()
@@ -464,6 +487,7 @@ internal sealed class TrayApp : ApplicationContext
         try { _fans.Stop(); } catch (Exception ex) { Log.Write("Lüfter stoppen: " + ex.Message); }
         try { using var stop = new EventWaitHandle(false, EventResetMode.ManualReset, Watchdog.StopEventName); stop.Set(); } catch { }
         try { _light.Dispose(); } catch { }
+        try { _extra.Dispose(); } catch { }
         try { _fans.Dispose(); } catch { }
     }
 

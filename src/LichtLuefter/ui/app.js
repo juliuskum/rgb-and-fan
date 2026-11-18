@@ -23,6 +23,18 @@ if (bridge) {
       case "light": S.light = data; renderLightStatus(); break;
       case "toast": toast(data.text); break;
       case "conflicts": S.conflicts = data; renderConflicts(); break;
+      case "monitorHistory":
+        MON.history = (data || []).slice(-MON_LEN);
+        if (ui.tab === "monitor") renderMonitor();
+        break;
+      case "monitor":
+        MON.groups = data.groups || [];
+        if (data.sample && (!MON.history.length || data.sample.t > MON.history[MON.history.length - 1].t)) {
+          MON.history.push(data.sample);
+          if (MON.history.length > MON_LEN) MON.history.shift();
+        }
+        if (ui.tab === "monitor" && !document.hidden) renderMonitor();
+        break;
     }
   });
 }
@@ -66,6 +78,7 @@ function selectTab(name) {
     $(b.getAttribute("aria-controls")).hidden = !on;
   }
   if (name === "fans") renderChart();
+  if (name === "monitor") renderMonitor();
 }
 
 // ------------------------------------------------------------------ Hilfen
@@ -578,6 +591,180 @@ function renderConflicts() {
   $("conflictGroup").hidden = c.length === 0;
   $("conflicts").textContent = c.length ? `Läuft gerade: ${c.join(", ")}. Diese Programme greifen ebenfalls auf Licht oder Lüfter zu. Bitte beenden, damit nur Licht & Lüfter die Hardware steuert.` : "";
 }
+
+// ------------------------------------------------------------------ Hardwaremonitor
+
+const MON_LEN = 300;                  // 5 min × 1/s
+const MON = { history: [], groups: [], hover: {} };
+
+// Farbe folgt dem Gerät (CPU = 1, GPU = 2), nicht der Reihenfolge. Höchstens 3 Reihen pro Diagramm
+// (nur die ersten drei Slots validieren für „alle Paare“). Eine Einheit pro Diagramm, nie zwei y-Achsen.
+const MON_CHARTS = [
+  { id: "temp", title: "Temperatur", unit: "°C", dec: 0, minSpan: 20, series: [["cpuAvg", "CPU Kerne Ø", 1], ["cpuPkg", "CPU heißester Kern", 3], ["gpu", "GPU", 2]] },
+  { id: "load", title: "Auslastung", unit: "%", dec: 0, fixed: [0, 100], series: [["cpuLoad", "CPU", 1], ["gpuLoad", "GPU", 2]] },
+  { id: "power", title: "Leistungsaufnahme", unit: "W", dec: 0, zero: true, minSpan: 50, series: [["cpuPower", "CPU", 1], ["gpuPower", "GPU", 2]] },
+  { id: "fans", title: "Lüfter und Pumpe", unit: "U/min", dec: 0, zero: true, minSpan: 500, series: null },
+];
+
+function fanSeries() {
+  // Reihen aus den Anschlüssen mit Drehzahl: Reihenfolge nach Kanal, Slots 1–3.
+  const g = MON.groups.find(x => x.id === "fans");
+  const keys = (g?.sensors || []).filter(s => s.key.startsWith("fan.rpm")).slice(0, 3);
+  return keys.map((s, i) => ["fan" + s.key.slice(7), s.label, i + 1]);
+}
+
+const numDe = (v, d) => v == null ? "–" : Number(v).toLocaleString("de-DE", { minimumFractionDigits: d, maximumFractionDigits: d });
+function niceStep(span, n) {
+  const raw = span / n, p = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / p;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p;
+}
+
+function renderMonitor() {
+  const wrap = $("charts");
+  if (!wrap.children.length) {
+    wrap.replaceChildren(...MON_CHARTS.map(c => {
+      const fig = el("figure", { class: "chart", id: "chart-" + c.id, tabindex: 0, "aria-label": `${c.title}, Verlauf der letzten 5 Minuten` },
+        el("h3", {}, c.title, el("span", { class: "unit", text: ` in ${c.unit}` })), el("ul", { class: "legend" }), sv("svg", { viewBox: "0 0 360 170", role: "img" }), el("div", { class: "tip", hidden: true }));
+      fig.style.margin = "0";
+      bindChartHover(fig, c);
+      return fig;
+    }));
+  }
+  for (const c of MON_CHARTS) drawChart(c);
+  renderMonGroups();
+}
+
+const MC = { l: 38, r: 58, t: 8, b: 22, w: 360, h: 170 };
+
+function chartGeom(c) {
+  const series = c.series || fanSeries();
+  const now = MON.history.length ? MON.history[MON.history.length - 1].t : Date.now();
+  const t0 = now - (MON_LEN - 1) * 1000;
+  let lo = Infinity, hi = -Infinity;
+  for (const s of MON.history) for (const [k] of series) { const v = s.v[k]; if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); } }
+  if (c.fixed) [lo, hi] = c.fixed;
+  else {
+    if (!isFinite(lo)) { lo = 0; hi = c.minSpan || 10; }
+    if (c.zero) lo = 0;
+    if (hi - lo < (c.minSpan || 1)) { const mid = (hi + lo) / 2; lo = c.zero ? 0 : mid - c.minSpan / 2; hi = c.zero ? Math.max(hi, c.minSpan) : mid + c.minSpan / 2; }
+    const st = niceStep(hi - lo, 4); lo = Math.floor(lo / st) * st; hi = Math.ceil(hi / st) * st;
+    if (!c.zero && lo < 0) lo = 0;
+  }
+  const x = (t) => MC.l + (t - t0) / ((MON_LEN - 1) * 1000) * (MC.w - MC.l - MC.r);
+  const y = (v) => MC.h - MC.b - (v - lo) / Math.max(1e-6, hi - lo) * (MC.h - MC.t - MC.b);
+  return { series, now, t0, lo, hi, x, y };
+}
+
+function drawChart(c) {
+  const fig = $("chart-" + c.id), svg = fig.querySelector("svg"), g = chartGeom(c);
+  // Legende: Linien-Schlüssel, Text in Textfarbe (nie in der Reihenfarbe)
+  fig.querySelector(".legend").replaceChildren(...g.series.map(([, label, slot]) => {
+    const k = el("span", { class: "key" }); k.style.background = `var(--series-${slot})`;
+    return el("li", {}, k, el("span", { text: label }));
+  }));
+  svg.replaceChildren();
+  const grid = sv("g", { class: "grid" }), axis = sv("g", { class: "axis" });
+  const st = c.fixed ? 25 : niceStep(g.hi - g.lo, 4);
+  for (let v = g.lo; v <= g.hi + 1e-6; v += st) {
+    grid.append(sv("line", { x1: MC.l, x2: MC.w - MC.r, y1: g.y(v), y2: g.y(v) }));
+    axis.append(sv("text", { x: MC.l - 6, y: g.y(v) + 3.5, "text-anchor": "end" }, numDe(v, 0)));
+  }
+  for (let m = 5; m >= 0; m--) {
+    const t = g.now - m * 60000;
+    axis.append(sv("text", { x: g.x(t), y: MC.h - 6, "text-anchor": m === 0 ? "end" : m === 5 ? "start" : "middle" }, m === 0 ? "jetzt" : m === 5 ? "−5 min" : "−" + m));
+  }
+  svg.append(grid, axis);
+
+  if (MON.history.length < 2) {
+    svg.append(sv("text", { class: "empty", x: (MC.l + MC.w - MC.r) / 2, y: MC.h / 2, "text-anchor": "middle" }, "Messwerte werden gesammelt …"));
+    return;
+  }
+  // Linien (Lücken bei fehlenden Werten), danach Endbeschriftungen ohne Überlappung
+  const ends = [];
+  for (const [key, label, slot] of g.series) {
+    let d = "", pen = false, last = null;
+    for (const s of MON.history) {
+      const v = s.v[key];
+      if (v == null || s.t < g.t0) { pen = false; continue; }
+      d += `${pen ? "L" : "M"}${g.x(s.t).toFixed(1)} ${g.y(v).toFixed(1)}`; pen = true; last = { t: s.t, v };
+    }
+    const p = sv("path", { class: "series", d }); p.style.stroke = `var(--series-${slot})`;
+    svg.append(p);
+    if (last) ends.push({ y: g.y(last.v), v: last.v, label });
+  }
+  ends.sort((a, b) => a.y - b.y);
+  for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < 13) ends[i].y = ends[i - 1].y + 13;
+  for (const e of ends) svg.append(sv("text", { class: "end", x: MC.w - MC.r + 6, y: e.y + 4 }, `${numDe(e.v, c.dec)} ${c.unit === "U/min" ? "" : c.unit}`.trim()));
+
+  // Fadenkreuz wiederherstellen (falls die Maus gerade im Diagramm steht)
+  const h = MON.hover[c.id];
+  if (h != null) drawCrosshair(c, fig, h);
+}
+
+function nearestIndex(c, fig, clientX) {
+  const svg = fig.querySelector("svg"), r = svg.getBoundingClientRect(), g = chartGeom(c);
+  const xv = (clientX - r.left) / r.width * MC.w;
+  let best = -1, bd = Infinity;
+  MON.history.forEach((s, i) => { const d = Math.abs(g.x(s.t) - xv); if (d < bd) { bd = d; best = i; } });
+  return best;
+}
+
+function drawCrosshair(c, fig, idx) {
+  const svg = fig.querySelector("svg"), tip = fig.querySelector(".tip"), g = chartGeom(c), s = MON.history[idx];
+  svg.querySelectorAll(".xh").forEach(n => n.remove());
+  if (!s) { tip.hidden = true; return; }
+  const x = g.x(s.t);
+  const grp = sv("g", { class: "xh" });
+  grp.append(sv("line", { class: "xhair", x1: x, x2: x, y1: MC.t, y2: MC.h - MC.b }));
+  const rows = [];
+  for (const [key, label, slot] of g.series) {
+    const v = s.v[key];
+    if (v != null) { const dot = sv("circle", { class: "xdot", cx: x, cy: g.y(v), r: 4 }); dot.style.fill = `var(--series-${slot})`; grp.append(dot); }
+    const k = el("span", { class: "key" }); k.style.background = `var(--series-${slot})`;
+    rows.push(el("div", { class: "row" }, k, el("strong", { text: `${numDe(v, c.dec)} ${c.unit}` }), el("span", { text: label })));
+  }
+  svg.append(grp);
+  const ago = Math.round((g.now - s.t) / 1000);
+  tip.replaceChildren(el("div", { class: "when", text: ago <= 0 ? "jetzt" : `vor ${ago} s` }), ...rows);
+  tip.hidden = false;
+  const r = svg.getBoundingClientRect(), fr = fig.getBoundingClientRect();
+  const px = r.left - fr.left + x / MC.w * r.width;
+  const left = px > fr.width / 2 ? px - tip.offsetWidth - 12 : px + 12;
+  tip.style.left = `${Math.max(4, left)}px`;
+  tip.style.top = `${r.top - fr.top + 10}px`;
+}
+
+function bindChartHover(fig, c) {
+  const move = (e) => { const i = nearestIndex(c, fig, e.clientX); MON.hover[c.id] = i; drawCrosshair(c, fig, i); };
+  fig.addEventListener("pointermove", move);
+  fig.addEventListener("pointerleave", () => { MON.hover[c.id] = null; drawCrosshair(c, fig, -1); });
+  // Tastatur: Pfeile verschieben das Fadenkreuz, Esc blendet es aus
+  fig.addEventListener("keydown", (e) => {
+    const n = MON.history.length; if (!n) return;
+    let i = MON.hover[c.id] ?? n - 1;
+    if (e.key === "ArrowLeft") i = Math.max(0, i - (e.shiftKey ? 30 : 5));
+    else if (e.key === "ArrowRight") i = Math.min(n - 1, i + (e.shiftKey ? 30 : 5));
+    else if (e.key === "Escape") { MON.hover[c.id] = null; drawCrosshair(c, fig, -1); return; }
+    else return;
+    e.preventDefault(); MON.hover[c.id] = i; drawCrosshair(c, fig, i);
+  });
+  fig.addEventListener("blur", () => { MON.hover[c.id] = null; drawCrosshair(c, fig, -1); });
+}
+
+function renderMonGroups() {
+  const fmtV = (s, v) => v == null ? "–" : `${numDe(v, s.decimals)} ${s.unit}`;
+  $("monGroups").replaceChildren(...MON.groups.filter(g => g.sensors.length).map(g =>
+    el("section", { class: "mon-group" },
+      el("h3", { text: g.title }),
+      el("p", { class: "device", text: g.device }),
+      el("table", { class: "mon-table" },
+        el("thead", {}, el("tr", {}, el("th", { text: "Sensor" }), el("th", { text: "Aktuell" }), el("th", { text: "Min" }), el("th", { text: "Max" }))),
+        el("tbody", {}, ...g.sensors.map(s => el("tr", {},
+          el("td", { text: s.label }), el("td", { class: "cur", text: fmtV(s, s.value) }),
+          el("td", { class: "mm", text: fmtV(s, s.min) }), el("td", { class: "mm", text: fmtV(s, s.max) }))))))));
+}
+
+$("resetMinMax").addEventListener("click", () => send("monitor.reset"));
 
 selectTab("light");
 send("ready");

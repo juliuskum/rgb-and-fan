@@ -484,7 +484,46 @@ public sealed class FanService : IDisposable
             snap = new FanSnapshot(_mode, s.ActiveProfile, _message, cpuS, gpuS, headers,
                 mon?.CpuName ?? "", mon?.GpuName ?? "", mon?.BoardName ?? "", _emergency, mon?.CpuTemp, mon?.GpuTemp);
             Snapshot = snap;
+
+            // Hardwaremonitor: Gruppen + ein Verlaufspunkt pro Zyklus (Rohwerte, keine Glättung – es ist eine Messanzeige).
+            if (mon != null)
+            {
+                try
+                {
+                    string Lbl(int i) => headers.FirstOrDefault(h => h.Index == i)?.Label ?? $"Kanal {i}";
+                    MonitorGroups = MonitorBuilder.Build(mon.Hardware, mon.Headers, Lbl, _monitorMinMax);
+                    if (!_monitorLogged && MonitorGroups.Count > 0)
+                    {
+                        _monitorLogged = true;
+                        Log.Write("Hardwaremonitor: " + string.Join(" | ", MonitorGroups.Select(g => $"{g.Title}: " + string.Join(", ", g.Sensors.Select(x => $"{x.Label}={x.Value?.ToString("0.##") ?? "-"} {x.Unit}")))));
+                    }
+                    var sample = new MonitorSample(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), MonitorBuilder.Sample(MonitorGroups));
+                    _history.Enqueue(sample);
+                    while (_history.Count > HistoryLength) _history.Dequeue();
+                    LastSample = sample;
+                }
+                catch (Exception ex) { Log.Write("Hardwaremonitor: " + ex.Message); }
+            }
         }
         try { Updated?.Invoke(snap); } catch (Exception ex) { Log.Write("UI-Update: " + ex.Message); }
     }
+
+    // ------------------------------------------------------------------ Hardwaremonitor
+
+    /// <summary>5 Minuten Verlauf bei einem Punkt pro Sekunde.</summary>
+    public const int HistoryLength = 300;
+    private readonly Queue<MonitorSample> _history = new();
+    private readonly MinMaxTracker _monitorMinMax = new();
+    private bool _monitorLogged;
+
+    /// <summary>Gruppen CPU/GPU/Lüfter/Mainboard des letzten Zyklus.</summary>
+    public IReadOnlyList<MonitorGroup> MonitorGroups { get; private set; } = [];
+    public MonitorSample? LastSample { get; private set; }
+
+    public List<MonitorSample> MonitorHistory() { lock (_hw) return _history.ToList(); }
+
+    /// <summary>Laufwerke aus der einen LHM-Instanz (leer, bis die Sensoren gestartet sind).</summary>
+    public IReadOnlyList<LibreHardwareMonitor.Hardware.IHardware> StorageHardware => _mon?.StorageHardware ?? [];
+
+    public void ResetMonitorMinMax() => _monitorMinMax.RequestReset();
 }
