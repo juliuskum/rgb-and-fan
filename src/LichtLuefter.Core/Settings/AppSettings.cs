@@ -13,14 +13,21 @@ public static class Safety
     ///  * CPU_FAN1 (Kanal 0): läuft stabil bis 15 % (311 U/min), steht bei 10 %, läuft aus dem Stand ab 20 % an → 20 %.
     ///  * SYS_FAN6 (Kanal 7): läuft bei 30 % (1196 U/min), steht schlagartig bei 25 %, läuft erst ab 30 % an → 35 %.
     ///  * Nicht gemessene Anschlüsse: vorsichtig 40 % (ein anderer Lüfter kann schon bei 30 % abreißen).
+    /// Die Messwerte gelten nur für das gemessene Board. Auf einem anderen Board gilt für alle Anschlüsse 40 %.
+    /// Nach einem Lüftertausch neu messen (tools\Probe fansweep) und die Werte hier anpassen.
     /// Keine Einstellung und keine Profildatei kann diese Werte unterschreiten.
     /// </summary>
-    public static double FanMinFor(int headerIndex) => headerIndex switch
-    {
-        0 => 20,
-        7 => 35,
-        _ => 40,
-    };
+    public static double FanMinFor(int headerIndex, string boardName) =>
+        !boardName.Contains(MeasuredBoard, StringComparison.OrdinalIgnoreCase) ? UnmeasuredFanMinPercent : headerIndex switch
+        {
+            0 => 20,
+            7 => 35,
+            _ => UnmeasuredFanMinPercent,
+        };
+
+    /// <summary>Board, auf dem die Mindestwerte gemessen wurden (MSI MAG Z790 TOMAHAWK WIFI).</summary>
+    public const string MeasuredBoard = "MS-7D91";
+    public const double UnmeasuredFanMinPercent = 40;
 
     /// <summary>Kleinster Wert, den ein Kurvenpunkt für Lüfter überhaupt haben darf (pro Anschluss gilt zusätzlich <see cref="FanMinFor"/>).</summary>
     public const double FanMinPercent = 20;
@@ -262,6 +269,7 @@ public sealed class SettingsStore
                 var p = s.Fans.Profiles[i];
                 if (Same(p.FanCpu, old.cpu) && Same(p.FanGpu, old.gpu) && Same(p.Pump, old.pump))
                 {
+                    d.Name = p.Name; // ein eventuell umbenanntes Profil behält seinen Namen
                     s.Fans.Profiles[i] = d;
                     Log.Write($"Lüfterprofil „{d.Name}“ auf neue Standardkurven aktualisiert.");
                 }

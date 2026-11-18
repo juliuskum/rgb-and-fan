@@ -362,7 +362,6 @@ function renderInstrument() {
   const prof = S.settings?.fans.profiles.find(p => p.id === F.profile)?.name ?? "";
   const ctl = F.headers.filter(h => h.controlled).map(h => h.label);
   let html;
-  const sm = S.safety || { pumpMin: 70, fanMin: 30 };
   switch (F.mode) {
     case "starting": html = "Sensoren starten …"; break;
     case "unsupported": html = esc(F.message); break;
@@ -445,7 +444,7 @@ function sv(tag, attrs = {}, text) {
   return n;
 }
 function editProfile() { return S.settings.fans.profiles.find(p => p.id === ui.editProfile) || S.settings.fans.profiles[0]; }
-function floorFor(key) { return key === "pump" ? (S.safety?.pumpMin ?? 70) : (S.safety?.fanMin ?? 30); }
+function floorFor(key) { return key === "pump" ? (S.safety?.pumpMin ?? 70) : (S.safety?.fanMin ?? 20); }
 function evalCurve(pts, t) {
   const s = [...pts].sort((a, b) => a.t - b.t);
   if (!s.length) return 100;

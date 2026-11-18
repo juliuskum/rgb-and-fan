@@ -154,7 +154,8 @@ public sealed class SuperIoAccess
     }
 
     /// <summary>Gibt mehrere Kanäle zurück, mit Wiederholungen. Liefert die Kanäle, bei denen es NICHT gelang.</summary>
-    public List<int> RestoreBiosAll(IEnumerable<BiosChannelState> states, int attempts = 10)
+    /// <param name="onAttempt">Wird vor jedem Versuch aufgerufen (z. B. Lebenszeichen für den Watchdog).</param>
+    public List<int> RestoreBiosAll(IEnumerable<BiosChannelState> states, int attempts = 10, Action? onAttempt = null)
     {
         var failed = new List<int>();
         foreach (var s in states)
@@ -162,6 +163,7 @@ public sealed class SuperIoAccess
             bool ok = false;
             for (int a = 0; a < attempts && !ok; a++)
             {
+                onAttempt?.Invoke();
                 try { ok = RestoreBios(s.Index, s.Command); } catch { ok = false; }
                 if (!ok) Thread.Sleep(100);
             }

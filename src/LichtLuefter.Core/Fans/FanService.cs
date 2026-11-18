@@ -20,7 +20,7 @@ public sealed record FanSnapshot(
 /// Läuft auf einem eigenen Thread; alle Hardwarezugriffe passieren dort oder unter <see cref="_hw"/>.
 ///
 /// Sicherheitslogik (siehe <see cref="Safety"/>):
-///  * Pumpe nie unter 70 %, Lüfter nie unter 30 % – auch wenn ein Profil weniger verlangt.
+///  * Pumpe nie unter 70 %, Lüfter nie unter ihrem gemessenen Minimum (Safety.FanMinFor) – auch wenn ein Profil weniger verlangt.
 ///  * CPU ≥ 90 °C oder GPU ≥ 86 °C: alle geregelten Kanäle sofort 100 %.
 ///  * Temperatursensor fällt > 5 s aus, Pumpe/Lüfter bleibt stehen, Chip bestätigt Befehle nicht:
 ///    alles zurück auf BIOS-Kurve.
@@ -48,6 +48,13 @@ public sealed class FanService : IDisposable
     private DateTime _sensorFaultSince = DateTime.MinValue, _sensorOkSince = DateTime.MinValue;
     private string? _lastTickError;
     private double? _cpuSmooth, _gpuSmooth, _cpuAvgSmooth;
+    private DateTime _lastAvgValid = DateTime.UtcNow;
+    private bool _avgWasOk = true;
+
+    /// <summary>Exponentielle Glättung je Regelzyklus (siehe <see cref="Safety.TempSmoothing"/>).</summary>
+    private static double Smooth(double? prev, float v) => prev is double s ? s + (v - s) * Safety.TempSmoothing : v;
+
+    private const string RestorePendingNote = " Zurücksetzen nicht bestätigt – der Watchdog versucht es weiter.";
     private bool _gpuSeen;
     private bool _emergency;
 
@@ -63,6 +70,7 @@ public sealed class FanService : IDisposable
         public required BiosChannelState Bios;
         public required ChannelRole Role;
         public double Current;           // zuletzt geschriebener Wert
+        public double? Target;           // zuletzt angenommenes Ziel (Totband)
         public DateTime LastWrite = DateTime.MinValue;
         public int WriteFailures;
         public float StartRpm;
@@ -155,12 +163,16 @@ public sealed class FanService : IDisposable
         mon.Update();
         var now = DateTime.UtcNow;
 
-        const double k = Safety.TempSmoothing;
-        if (mon.CpuTemp is float c) { _lastCpuValid = now; _cpuSmooth = _cpuSmooth is double s ? s + (c - s) * k : c; }
+        if (mon.CpuTemp is float c) { _lastCpuValid = now; _cpuSmooth = Smooth(_cpuSmooth, c); }
         // Lüfterkurven folgen dem Kerndurchschnitt: „Package“ (heißester Kern) springt schon im Leerlauf um 20 °C und
         // ließ die Lüfter in der Simulation beim Spielen 16× pro Minute hoch und runter laufen. Notfall bleibt am Package.
-        if (mon.CpuAvgTemp is float ca) _cpuAvgSmooth = _cpuAvgSmooth is double sa ? sa + (ca - sa) * k : ca;
-        if (mon.GpuTemp is float g) { _lastGpuValid = now; _gpuSeen = true; _gpuSmooth = _gpuSmooth is double s2 ? s2 + (g - s2) * k : g; }
+        if (mon.CpuAvgTemp is float ca) { _lastAvgValid = now; _cpuAvgSmooth = Smooth(_cpuAvgSmooth, ca); }
+        if (mon.GpuTemp is float g) { _lastGpuValid = now; _gpuSeen = true; _gpuSmooth = Smooth(_gpuSmooth, g); }
+
+        // Fällt nur der Kerndurchschnitt aus, regeln die Kurven auf dem (höheren, also vorsichtigeren) Package-Wert
+        // weiter, statt auf einem eingefrorenen Wert.
+        bool avgOk = (now - _lastAvgValid).TotalSeconds <= Safety.SensorLossSeconds;
+        if (avgOk != _avgWasOk) { Log.Write(avgOk ? "Kerndurchschnitt wieder verfügbar." : "Kerndurchschnitt liefert keine Werte – Kurven nutzen CPU Package."); _avgWasOk = avgOk; }
 
         var settings = _settings();
         bool sensorsOk = (now - _lastCpuValid).TotalSeconds <= Safety.SensorLossSeconds
@@ -203,7 +215,7 @@ public sealed class FanService : IDisposable
                     && _mode != FanMode.Fault && _mode != FanMode.Unsupported
                     && sensorsOk && _sensorFaultSince == DateTime.MinValue;
 
-        if (!want)
+        if (!want || profile is null)
         {
             if (_controlled.Count > 0)
                 ReleaseAll(!sensorsOk ? "Temperatursensor ausgefallen – BIOS-Kurve aktiv." : "BIOS-Kurve aktiv.", fault: false);
@@ -213,7 +225,6 @@ public sealed class FanService : IDisposable
             return;
         }
 
-        if (profile == null) return; // durch want bereits ausgeschlossen; für die Nullable-Analyse
         // Nur Kanäle, die es auf dem Board wirklich gibt.
         var wanted = ChannelsToControl(settings).Where(kv => mon.Headers.Any(h => h.Index == kv.Key)).ToDictionary();
 
@@ -280,20 +291,25 @@ public sealed class FanService : IDisposable
             }
             else ch.StallSince = DateTime.MinValue;
 
-            // --- Sollwert (CPU-Achse = Kerndurchschnitt)
-            double cpuCurve = _cpuAvgSmooth ?? cpu;
+            // --- Sollwert (CPU-Achse = Kerndurchschnitt; fällt er aus, das vorsichtigere Package)
+            double cpuCurve = avgOk && _cpuAvgSmooth is double avg ? avg : cpu;
             double target = ch.Role == ChannelRole.Pump
                 ? Curve.Eval(profile.Pump, cpuCurve)
                 : Math.Max(Curve.Eval(profile.FanCpu, cpuCurve), Curve.Eval(profile.FanGpu, gpu));
-            double floor = ch.Role == ChannelRole.Pump ? Safety.PumpMinPercent : Safety.FanMinFor(idx);
+            double floor = ch.Role == ChannelRole.Pump ? Safety.PumpMinPercent : Safety.FanMinFor(idx, mon.BoardName);
             target = Math.Clamp(target, floor, 100);
-            if (_emergency) target = 100;
-            // Totband: kleine Änderungen ignorieren (sonst hörbares Auf und Ab), außer der aktuelle Wert liegt unter dem Minimum.
-            // Minimum und 100 % werden immer genau erreicht.
-            else if (Math.Abs(target - ch.Current) < Safety.DeadbandPercent && ch.Current >= floor && target > floor && target < 100) target = ch.Current;
+
+            // Totband gegen das zuletzt angenommene Ziel (nicht gegen den Rampenwert – sonst bliebe jede Rampe bis zu
+            // 3 % vor dem Ziel stehen): kleine Schwankungen ändern das Ziel nicht, die Rampe läuft aber immer ganz durch.
+            // Minimum, 100 % und Notfall werden immer übernommen.
+            if (_emergency) ch.Target = 100;
+            else if (ch.Target is not double accepted || Math.Abs(target - accepted) >= Safety.DeadbandPercent
+                     || target <= floor || target >= 100 || accepted < floor)
+                ch.Target = target;
+            double goal = ch.Target ?? target;
 
             // --- Rampe: zügig hoch, langsam runter; im Notfall sofort 100 %
-            double next = target > ch.Current ? Math.Min(target, ch.Current + Safety.RampUpPerSecond) : Math.Max(target, ch.Current - Safety.RampDownPerSecond);
+            double next = goal > ch.Current ? Math.Min(goal, ch.Current + Safety.RampUpPerSecond) : Math.Max(goal, ch.Current - Safety.RampDownPerSecond);
             if (_emergency) next = 100;
             next = Math.Clamp(Math.Round(next, 1), floor, 100);
 
@@ -331,6 +347,8 @@ public sealed class FanService : IDisposable
         return d;
     }
 
+    private void BeatSafe() { try { _heartbeat?.Beat(); } catch { } }
+
     private void Fault(string msg, string profile)
     {
         Log.Write("STÖRUNG: " + msg);
@@ -344,7 +362,8 @@ public sealed class FanService : IDisposable
     {
         if (_controlled.Count > 0 && _sio != null)
         {
-            var failed = _sio.RestoreBiosAll(_controlled.Values.Select(c => c.Bios));
+            // Lebenszeichen während der Versuche: Bei belegtem Bus können sie länger als das Watchdog-Zeitlimit dauern.
+            var failed = _sio.RestoreBiosAll(_controlled.Values.Select(c => c.Bios), onAttempt: BeatSafe);
             Log.Write($"Zurück auf BIOS ({msg}): Kanäle {string.Join(",", _controlled.Keys)}" + (failed.Count > 0 ? $" – FEHLGESCHLAGEN: {string.Join(",", failed)}" : " – bestätigt"));
             if (failed.Count == 0)
             {
@@ -355,17 +374,16 @@ public sealed class FanService : IDisposable
             {
                 foreach (var k in _controlled.Keys.Except(failed).ToList()) _controlled.Remove(k);
                 FanStateFile.Save(_controlled.Values.Select(c => c.Bios));
-                msg += " Zurücksetzen nicht bestätigt – der Watchdog versucht es weiter.";
+                msg += RestorePendingNote;
             }
         }
         // Eine bestehende Störung wird durch ein späteres, normales Abgeben nicht aufgehoben –
         // nur der Nutzer quittiert sie (Profilwechsel oder „Erneut versuchen“).
         bool keepFault = !fault && _mode == FanMode.Fault;
         _mode = fault || keepFault ? FanMode.Fault : (_mode == FanMode.Unsupported ? FanMode.Unsupported : FanMode.Bios);
-        const string pending = " Zurücksetzen nicht bestätigt – der Watchdog versucht es weiter.";
         if (!keepFault) _message = msg;
-        else if (_controlled.Count > 0 && !_message.Contains(pending)) _message += pending;
-        else if (_controlled.Count == 0) _message = _message.Replace(pending, "");
+        else if (_controlled.Count > 0 && !_message.Contains(RestorePendingNote)) _message += RestorePendingNote;
+        else if (_controlled.Count == 0) _message = _message.Replace(RestorePendingNote, "");
         _emergency = false;
     }
 
@@ -457,10 +475,11 @@ public sealed class FanService : IDisposable
                 var role = cfg?.Role ?? ChannelRole.Off;
                 if (h.Index == Safety.PumpHeaderIndex && role != ChannelRole.Off) role = ChannelRole.Pump;
                 return new HeaderSnapshot(h.Index, h.Name, cfg?.Label is { Length: > 0 } l ? l : h.Name, role, h.Rpm, h.DutyPercent, cc?.Current, cc != null,
-                    role == ChannelRole.Pump ? Safety.PumpMinPercent : Safety.FanMinFor(h.Index));
+                    role == ChannelRole.Pump ? Safety.PumpMinPercent : Safety.FanMinFor(h.Index, mon.BoardName));
             }).ToList();
             // Angezeigt wird, was die Kurven verwenden: geglätteter Kerndurchschnitt. Rohwert = heißester Kern (Tooltip).
-            float? cpuS = mon?.CpuAvgTemp != null && _cpuAvgSmooth is double cs ? (float)cs : null;
+            float? cpuS = mon?.CpuAvgTemp != null && _cpuAvgSmooth is double cs ? (float)cs
+                        : mon?.CpuTemp != null && _cpuSmooth is double cp ? (float)cp : null;
             float? gpuS = mon?.GpuTemp != null && _gpuSmooth is double gs ? (float)gs : null;
             snap = new FanSnapshot(_mode, s.ActiveProfile, _message, cpuS, gpuS, headers,
                 mon?.CpuName ?? "", mon?.GpuName ?? "", mon?.BoardName ?? "", _emergency, mon?.CpuTemp, mon?.GpuTemp);
