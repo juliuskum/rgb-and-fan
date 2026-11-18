@@ -209,14 +209,18 @@ public sealed class ExtraMonitor : IDisposable
                         hw.Update();
                         n++;
                         var list = new List<MonitorSensor>();
-                        foreach (var t in hw.Sensors.Where(s => s.SensorType == SensorType.Temperature && s.Value is > 0 and < 150).OrderBy(s => s.Index))
-                            list.Add(_mm.Track($"disk{n}.t{t.Index}", t.Index == 0 ? "Temperatur" : $"Temperatur {t.Index + 1}", t.Value, "°C", 0));
+                        // Nur Messsensoren („Temperature“, „Temperature #n“). LHM führt auch die Grenzwerte des Laufwerks
+                        // („Warning/Critical Temperature“) als Temperatur – die sind keine Messung (gemessen: SN850X 89/93 °C).
+                        foreach (var t in hw.Sensors.Where(s => s.SensorType == SensorType.Temperature && s.Value is > 0 and < 150
+                                                               && (s.Name == "Temperature" || s.Name.StartsWith("Temperature #", StringComparison.Ordinal))).OrderBy(s => s.Index))
+                            list.Add(_mm.Track($"disk{n}.t{t.Index}", t.Name == "Temperature" ? "Temperatur" : "Temperatursensor " + t.Name["Temperature #".Length..], t.Value, "°C", 0));
+                        var warn = hw.Sensors.FirstOrDefault(s => s.SensorType == SensorType.Temperature && s.Name == "Warning Temperature")?.Value;
                         if (hw.Sensors.FirstOrDefault(s => s.SensorType == SensorType.Load && s.Name == "Used Space") is { } us)
                             list.Add(_mm.Track($"disk{n}.used", "Belegt", us.Value, "%", 0));
                         foreach (var (name, label) in new[] { ("Read Rate", "Lesen"), ("Write Rate", "Schreiben") })
                             if (hw.Sensors.FirstOrDefault(s => s.SensorType == SensorType.Throughput && s.Name == name) is { } r)
                                 list.Add(_mm.Track($"disk{n}.{name}", label, r.Value / 1048576f, "MB/s", 1));
-                        if (list.Count > 0) groups.Add(new MonitorGroup($"disk{n}", "Laufwerk", hw.Name, list));
+                        if (list.Count > 0) groups.Add(new MonitorGroup($"disk{n}", "Laufwerk", warn is > 0 and < 150 ? $"{hw.Name}, Warngrenze {warn:0} °C" : hw.Name, list));
                     }
                 Groups = groups;
                 if (!_logged && n > 0 && groups.Any(g => g.Id.StartsWith("disk")))
